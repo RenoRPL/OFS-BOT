@@ -2119,11 +2119,14 @@ class ActiveQuestManageView(discord.ui.View):
                     print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Role={player_role}, Rank={player_rank}")
                     debug_info += f"• Row {i}: ID={player_id}, Name={player_name}\n"
                     
-                    # Skip the quest leader row (they have different data structure)
-                    if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.patrol_leader.id):
+                    # For testing: Include ALL participants (including quest leader) 
+                    # TODO: Remove quest leader inclusion after testing
+                    if player_id and player_name and player_id != "❓":
                         # Format as [player_name, player_rank, player_role, row_index] for ParticipantManagementView
                         participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
                         print(f"✅ Added participant: {player_name} ({player_rank}) - {player_role}")
+                        if player_id == str(self.join_quest_view.patrol_leader.id):
+                            print(f"⚠️ Note: This is the quest leader (included for testing)")
             
             debug_info += f"\n**Summary:**\n"
             debug_info += f"• Rows checked: {rows_checked}\n"
@@ -2517,7 +2520,11 @@ class ParticipantRemoveConfirmView(discord.ui.View):
         try:
             # Get the quest data
             join_quest_view = self.quest_manage_view.join_quest_view
-            worksheet = join_quest_view.worksheet
+            worksheet = await join_quest_view.quest_cog.get_worksheet_cached("Patrols")
+            
+            if not worksheet:
+                await interaction.response.send_message("❌ Could not access the quest database.", ephemeral=True)
+                return
             
             # Get the actual row index from the participant data
             # participant_data format: [player_name, player_rank, player_role, row_index]
@@ -2560,7 +2567,11 @@ class ParticipantRemoveConfirmView(discord.ui.View):
         try:
             # Get fresh participant data
             join_quest_view = self.quest_manage_view.join_quest_view
-            worksheet = join_quest_view.worksheet
+            worksheet = await join_quest_view.quest_cog.get_worksheet_cached("Patrols")
+            
+            if not worksheet:
+                await interaction.followup.send("❌ Could not access the quest database.", ephemeral=True)
+                return
             
             # Re-fetch participant data
             all_values = await join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
