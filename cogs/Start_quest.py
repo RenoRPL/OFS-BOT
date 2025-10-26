@@ -2517,6 +2517,9 @@ class ParticipantRemoveConfirmView(discord.ui.View):
     @discord.ui.button(label="Confirm Removal", style=discord.ButtonStyle.danger, emoji="❌")
     async def confirm_removal(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Confirm and execute participant removal"""
+        # Defer the interaction immediately to prevent timeout
+        await interaction.response.defer(ephemeral=True)
+        
         try:
             # Get the quest data
             join_quest_view = self.quest_manage_view.join_quest_view
@@ -2579,12 +2582,26 @@ class ParticipantRemoveConfirmView(discord.ui.View):
             
             # Send removal notification to the quest forum thread if it exists
             try:
-                if hasattr(join_quest_view, 'thread_id') and join_quest_view.thread_id:
-                    thread = guild.get_thread(int(join_quest_view.thread_id))
+                # Get thread_id from Google Sheets
+                thread_id = None
+                all_values_fresh = await join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
+                for row in all_values_fresh:
+                    if len(row) > 0 and row[0] == join_quest_view.patrol_id:
+                        if len(row) > 19:  # T: Thread ID
+                            thread_id = row[19] if row[19] else None
+                        break
+                
+                if thread_id and guild:
+                    thread = guild.get_thread(int(thread_id))
                     if thread:
                         await thread.send(embed=removal_embed)
+                        print(f"✅ Posted departure notification to thread {thread_id}")
+                    else:
+                        print(f"⚠️ Could not find thread with ID {thread_id}")
+                else:
+                    print(f"⚠️ No thread_id found for quest {join_quest_view.patrol_id}")
             except Exception as e:
-                print(f"Could not send removal notification to thread: {e}")
+                print(f"❌ Could not send removal notification to thread: {e}")
             
             # Update the quest roster
             try:
@@ -2607,16 +2624,17 @@ class ParticipantRemoveConfirmView(discord.ui.View):
             # Return to main quest management view
             new_view = ActiveQuestManageView(join_quest_view)
             
-            await interaction.response.edit_message(embed=embed, view=new_view)
+            # Edit the original message to show success
+            await interaction.edit_original_response(embed=embed, view=new_view)
             
         except Exception as e:
-            print(f"Error removing participant: {e}")
+            print(f"❌ Error removing participant: {e}")
             error_msg = f"❌ Error removing participant: {str(e)}"
             
-            if interaction.response.is_done():
+            try:
+                await interaction.edit_original_response(content=error_msg, embed=None, view=None)
+            except:
                 await interaction.followup.send(error_msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
     async def cancel_removal(self, interaction: discord.Interaction, button: discord.ui.Button):
