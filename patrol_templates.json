@@ -1,0 +1,18 @@
+{
+  "533127850409328670": {
+    "Test Patrol": {
+      "patrol_name": "Quest Name Here",
+      "patrol_description": "We will be on the hunt for rare ore",
+      "patrol_image": "https://cdn.discordapp.com/attachments/900786404508971049/1426951381645791455/ChatGPT_Image_Oct_11_2025_09_03_08_PM.png?ex=68ed1788&is=68ebc608&hm=447e2c28b6fc2722d6b5f8a2589e43643e56a1b65c95330f84d5d",
+      "scheduled_duration": "60"
+    }
+  },
+  "1385700546434039928": {
+    "Panic at the Distro": {
+      "patrol_name": "Panic at the Distro",
+      "patrol_description": "RDV at Port Tressler for Distro runs.",
+      "patrol_image": "",
+      "scheduled_duration": "120"
+    }
+  }
+}

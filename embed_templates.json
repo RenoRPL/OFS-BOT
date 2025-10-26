@@ -1,0 +1,32 @@
+{
+  "533127850409328670": {
+    "Test Template": {
+      "mention_text": "",
+      "title": "Test",
+      "message": "body",
+      "image_url": "https://cdn.discordapp.com/attachments/900786404508971049/1426951381645791455/ChatGPT_Image_Oct_11_2025_09_03_08_PM.png?ex=68ed1788&is=68ebc608&hm=447e2c28b6fc2722d6b5f8a2589e43643e56a1b65c95330f84d5d80b3480f702&",
+      "btn_label": "",
+      "btn_url": "",
+      "footer_text": "Footer",
+      "footer_icon_url": "",
+      "thumbnail_url": "https://cdn.discordapp.com/attachments/900786404508971049/1426959204295507988/Asset_12rank_icon.png?ex=68ed1ed1&is=68ebcd51&hm=efc8ccd16a830f0b8959e6f4e27d32ba8e1a90bfc8d8bf9539c2e0a5c575e069&",
+      "author_name": "Reno",
+      "author_icon_url": "https://cdn.discordapp.com/attachments/900786404508971049/1426951381645791455/ChatGPT_Image_Oct_11_2025_09_03_08_PM.png?ex=68ed1788&is=68ebc608&hm=447e2c28b6fc2722d6b5f8a2589e43643e56a1b65c95330f84d5d80b3480f702&",
+      "author_url": "",
+      "color_hex": "#66666",
+      "add_timestamp": false,
+      "fields": [
+        {
+          "name": "Field #1",
+          "value": "field value",
+          "inline": true
+        },
+        {
+          "name": "Field #2",
+          "value": "field value",
+          "inline": true
+        }
+      ]
+    }
+  }
+}

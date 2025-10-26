@@ -1,0 +1,50 @@
+{
+  "Panic at the Distro": {
+    "name": "Panic at the Distro",
+    "description": "Spamming Distros",
+    "image": "https://i.imgur.com/TZWyG45.png",
+    "length": 120,
+    "scroll": "\ud83d\udcdc",
+    "game": "Star Citizen"
+  },
+  "Ashes": {
+    "name": "Test for Ashes",
+    "description": "Description of Ashes",
+    "image": "https://i.imgur.com/TZWyG45.png",
+    "length": 60,
+    "scroll": "\ud83d\udcdc",
+    "game": "Ashes of Creation"
+  },
+  "Battle at Dupree": {
+    "name": "Battle at Dupree",
+    "description": "Man the stations! All hands on deck! A battle has broken out at Dupree! RDV at closest space station.",
+    "image": "https://i.imgur.com/TZWyG45.png",
+    "length": 60,
+    "scroll": "\ud83d\udcdc",
+    "game": "Star Citizen"
+  },
+  "Onyx Site": {
+    "name": "Onyx Site Raids",
+    "description": "RDV: On-site",
+    "image": "https://cdn.discordapp.com/attachments/1080667409893040279/1429227771812515840/f51c7ea6-d3a1-4254-85f6-07cf5c54c524.png?ex=68f55f96&is=68f40e16&hm=e4f476eb8c68b6b29ca1d806031a4cb340cce43a2802580484961c000dbab886&",
+    "length": 120,
+    "scroll": "\ud83d\udde1\ufe0f",
+    "game": "Star Citizen"
+  },
+  "Headhunters Farm for the Event": {
+    "name": "Headhunters Reputation Farm",
+    "description": "Objective: Farming Headhunters Quests for the reputation in the event on phase 1 \nRDV:PT",
+    "image": "https://i.imgur.com/TZWyG45.png",
+    "length": 60,
+    "scroll": "\ud83d\udcdc",
+    "game": "Star Citizen"
+  },
+  "Pilot Training": {
+    "name": "Pilot Training",
+    "description": "Learn new tricks for becoming a better pilot",
+    "image": "https://i.imgur.com/TZWyG45.png",
+    "length": 60,
+    "scroll": "\ud83d\udcdc",
+    "game": "Star Citizen"
+  }
+}
