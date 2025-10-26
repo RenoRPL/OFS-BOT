@@ -2054,7 +2054,7 @@ class ActiveQuestManageView(discord.ui.View):
         try:
             # Check if user is admin or quest leader
             is_admin = interaction.user.guild_permissions.administrator
-            is_leader = interaction.user.id == self.join_quest_view.leader.id
+            is_leader = interaction.user.id == self.join_quest_view.patrol_leader.id
             
             if not is_admin and not is_leader:
                 await interaction.response.send_message("❌ Only quest leaders and administrators can manage participants.", ephemeral=True)
@@ -2084,7 +2084,7 @@ class ActiveQuestManageView(discord.ui.View):
                     print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Role={player_role}, Rank={player_rank}")
                     
                     # Skip the quest leader row (they have different data structure)
-                    if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.leader.id):
+                    if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.patrol_leader.id):
                         # Format as [player_name, player_rank, player_role, row_index] for ParticipantManagementView
                         participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
                         print(f"✅ Added participant: {player_name} ({player_rank}) - {player_role}")
@@ -2527,7 +2527,7 @@ class ParticipantRemoveConfirmView(discord.ui.View):
                     player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
                     
                     # Skip the quest leader row (they have different data structure)
-                    if player_id and player_name and player_id != "❓" and player_id != str(join_quest_view.leader.id):
+                    if player_id and player_name and player_id != "❓" and player_id != str(join_quest_view.patrol_leader.id):
                         participant_data.append([player_name, player_rank, player_role, i])
             
             # Return to participant management
