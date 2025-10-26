@@ -3604,7 +3604,7 @@ class StartQuest(commands.Cog):
         # Lookup leader info from Member Log
         leader_info = await self.lookup_member_info(str(quest_leader.id))
         
-        quest_id = self.get_next_quest_id(interaction.guild.id)
+        quest_id = await self.get_next_quest_id(interaction.guild.id)
         view = QuestMakerView(quest_leader, game, quest_id, interaction.guild.id, self, leader_info, quest_type)
         view.original_interaction = interaction  # Store the original interaction
         embed = view.create_embed()
