@@ -2530,12 +2530,69 @@ class ParticipantRemoveConfirmView(discord.ui.View):
             # participant_data format: [player_name, player_rank, player_role, row_index]
             participant_row = self.participant_data[3]  # The row index we stored earlier
             
+            # Get the user ID before deleting the row
+            all_values = await join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
+            removed_user_id = None
+            
+            if participant_row <= len(all_values):
+                row_data = all_values[participant_row - 1]  # Convert to 0-based index
+                if len(row_data) > 10:  # K: Player ID
+                    removed_user_id = row_data[10]
+            
             # Delete the entire row
             await join_quest_view.quest_cog.rate_limited_api_call(worksheet.delete_rows, participant_row)
             
             player_name = self.participant_data[0] if len(self.participant_data) > 0 else "Unknown"
             
-            # Create success embed
+            # Get the removed participant's Discord user info
+            removed_user = None
+            
+            try:
+                guild = interaction.guild
+                if guild and removed_user_id:
+                    # Try to get the user by ID first (most reliable)
+                    try:
+                        removed_user = guild.get_member(int(removed_user_id))
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # Fallback: try to find the user by display name
+                    if not removed_user:
+                        for member in guild.members:
+                            if member.display_name == player_name:
+                                removed_user = member
+                                break
+            except Exception as e:
+                print(f"Could not find Discord user for {player_name}: {e}")
+            
+            # Create simple removal notification embed
+            removal_embed = discord.Embed(
+                title="🚪🚶 Quest Departure",
+                description=f"**{player_name}** has left the Quest!",
+                color=0xFF6B35  # Orange color
+            )
+            
+            # Add user avatar if we found the Discord user
+            if removed_user:
+                removal_embed.set_thumbnail(url=removed_user.display_avatar.url)
+                removal_embed.description = f"**{removed_user.display_name}** has left the Quest!"
+            
+            # Send removal notification to the quest forum thread if it exists
+            try:
+                if hasattr(join_quest_view, 'thread_id') and join_quest_view.thread_id:
+                    thread = guild.get_thread(int(join_quest_view.thread_id))
+                    if thread:
+                        await thread.send(embed=removal_embed)
+            except Exception as e:
+                print(f"Could not send removal notification to thread: {e}")
+            
+            # Update the quest roster
+            try:
+                await join_quest_view.update_roster_embed()
+            except Exception as e:
+                print(f"Could not update quest roster: {e}")
+            
+            # Create success embed for the management interface
             embed = discord.Embed(
                 title="✅ Participant Removed",
                 description=f"**{player_name}** has been successfully removed from the quest.",
