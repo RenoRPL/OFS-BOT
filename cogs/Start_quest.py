@@ -2098,14 +2098,26 @@ class ActiveQuestManageView(discord.ui.View):
                 patrol_id_in_row = row[0] if len(row) > 0 else "EMPTY"
                 print(f"🔍 Row {i+1}: Patrol ID = '{patrol_id_in_row}'")
             
+            # Debug info for Discord (temporary)
+            debug_info = f"🔍 **Debug Info:**\n"
+            debug_info += f"• Looking for quest: `{self.join_quest_view.patrol_id}`\n"
+            debug_info += f"• Total sheet rows: {len(all_values)}\n"
+            debug_info += f"• Quest leader ID: {self.join_quest_view.patrol_leader.id}\n\n"
+            
+            rows_checked = 0
+            matching_rows = 0
+            
             for i, row in enumerate(all_values[1:], start=2):  # Skip header, start from row 2
+                rows_checked += 1
                 if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
+                    matching_rows += 1
                     player_id = row[10] if len(row) > 10 else ""     # K: Player ID
                     player_name = row[11] if len(row) > 11 else ""   # L: Player Name
                     player_role = row[12] if len(row) > 12 else ""   # M: Player Role
                     player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
                     
                     print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Role={player_role}, Rank={player_rank}")
+                    debug_info += f"• Row {i}: ID={player_id}, Name={player_name}\n"
                     
                     # Skip the quest leader row (they have different data structure)
                     if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.patrol_leader.id):
@@ -2113,10 +2125,21 @@ class ActiveQuestManageView(discord.ui.View):
                         participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
                         print(f"✅ Added participant: {player_name} ({player_rank}) - {player_role}")
             
+            debug_info += f"\n**Summary:**\n"
+            debug_info += f"• Rows checked: {rows_checked}\n"
+            debug_info += f"• Matching quest rows: {matching_rows}\n"
+            debug_info += f"• Valid participants: {len(participant_data)}\n"
+            
             print(f"👥 Total participants found: {len(participant_data)}")
             
             if not participant_data:
-                await interaction.followup.send("❌ No participants found for this quest.", ephemeral=True)
+                # Send debug info to Discord for troubleshooting
+                debug_embed = discord.Embed(
+                    title="🐛 Debug: No Participants Found",
+                    description=debug_info,
+                    color=0xff9900
+                )
+                await interaction.followup.send(embed=debug_embed, ephemeral=True)
                 return
             
             # Create participant management view with properly formatted data
