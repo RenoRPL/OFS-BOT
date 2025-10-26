@@ -2051,64 +2051,86 @@ class ActiveQuestManageView(discord.ui.View):
     @discord.ui.button(label="Manage Participants", style=discord.ButtonStyle.secondary, emoji="👥")
     async def manage_participants(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show participant management interface with remove options"""
-        # Check if user is admin or quest leader
-        is_admin = interaction.user.guild_permissions.administrator
-        is_leader = interaction.user.id == self.join_quest_view.leader.id
-        
-        if not is_admin and not is_leader:
-            await interaction.response.send_message("❌ Only quest leaders and administrators can manage participants.", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        # Get quest participants from the Patrols sheet
-        worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
-        if not worksheet:
-            await interaction.followup.send("❌ Could not access the quest database.", ephemeral=True)
-            return
-        
-        all_values = await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
-        participant_data = []
-        
-        for i, row in enumerate(all_values[1:], start=2):  # Skip header, start from row 2
-            if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
-                player_id = row[10] if len(row) > 10 else ""     # K: Player ID
-                player_name = row[11] if len(row) > 11 else ""   # L: Player Name
-                player_role = row[12] if len(row) > 12 else ""   # M: Player Role
-                player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
-                
-                # Skip the quest leader row (they have different data structure)
-                if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.leader.id):
-                    # Format as [username, commander_name, ship_type] for ParticipantManagementView
-                    # We'll use player_name, player_rank, and player_role as the display format
-                    participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
-        
-        if not participant_data:
-            await interaction.followup.send("❌ No participants found for this quest.", ephemeral=True)
-            return
-        
-        # Create participant management view with properly formatted data
-        participant_view = ParticipantManagementView(self, participant_data)
-        
-        # Create embed showing participants
-        embed = discord.Embed(
-            title="👥 Manage Quest Participants",
-            description=f"**Quest:** {self.join_quest_view.patrol_name}\n\n"
-                       f"Select a participant to remove from the quest:",
-            color=0x3498db
-        )
-        
-        participant_list = ""
-        for i, participant in enumerate(participant_data, 1):
-            player_name = participant[0]
-            player_rank = participant[1] if participant[1] else "Unknown"
-            player_role = participant[2] if participant[2] else "Unknown"
-            participant_list += f"**{i}.** {player_name} ({player_rank}) - {player_role}\n"
-        
-        embed.add_field(name=f"Participants ({len(participant_data)})", value=participant_list, inline=False)
-        embed.set_footer(text="⚠️ Removing a participant will permanently delete their quest data!")
-        
-        await interaction.followup.send(embed=embed, view=participant_view, ephemeral=True)
+        try:
+            # Check if user is admin or quest leader
+            is_admin = interaction.user.guild_permissions.administrator
+            is_leader = interaction.user.id == self.join_quest_view.leader.id
+            
+            if not is_admin and not is_leader:
+                await interaction.response.send_message("❌ Only quest leaders and administrators can manage participants.", ephemeral=True)
+                return
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get quest participants from the Patrols sheet
+            worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
+            if not worksheet:
+                await interaction.followup.send("❌ Could not access the quest database.", ephemeral=True)
+                return
+            
+            all_values = await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
+            participant_data = []
+            
+            print(f"🔍 Looking for participants in quest: {self.join_quest_view.patrol_id}")
+            print(f"📊 Total rows in sheet: {len(all_values)}")
+            
+            for i, row in enumerate(all_values[1:], start=2):  # Skip header, start from row 2
+                if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
+                    player_id = row[10] if len(row) > 10 else ""     # K: Player ID
+                    player_name = row[11] if len(row) > 11 else ""   # L: Player Name
+                    player_role = row[12] if len(row) > 12 else ""   # M: Player Role
+                    player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
+                    
+                    print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Role={player_role}, Rank={player_rank}")
+                    
+                    # Skip the quest leader row (they have different data structure)
+                    if player_id and player_name and player_id != "❓" and player_id != str(self.join_quest_view.leader.id):
+                        # Format as [player_name, player_rank, player_role, row_index] for ParticipantManagementView
+                        participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
+                        print(f"✅ Added participant: {player_name} ({player_rank}) - {player_role}")
+            
+            print(f"👥 Total participants found: {len(participant_data)}")
+            
+            if not participant_data:
+                await interaction.followup.send("❌ No participants found for this quest.", ephemeral=True)
+                return
+            
+            # Create participant management view with properly formatted data
+            participant_view = ParticipantManagementView(self, participant_data)
+            
+            # Create embed showing participants
+            embed = discord.Embed(
+                title="👥 Manage Quest Participants",
+                description=f"**Quest:** {self.join_quest_view.patrol_name}\n\n"
+                           f"Select a participant to remove from the quest:",
+                color=0x3498db
+            )
+            
+            participant_list = ""
+            for i, participant in enumerate(participant_data, 1):
+                player_name = participant[0]
+                player_rank = participant[1] if participant[1] else "Unknown"
+                player_role = participant[2] if participant[2] else "Unknown"
+                participant_list += f"**{i}.** {player_name} ({player_rank}) - {player_role}\n"
+            
+            embed.add_field(name=f"Participants ({len(participant_data)})", value=participant_list, inline=False)
+            embed.set_footer(text="⚠️ Removing a participant will permanently delete their quest data!")
+            
+            await interaction.followup.send(embed=embed, view=participant_view, ephemeral=True)
+            
+        except Exception as e:
+            print(f"❌ Error in manage_participants: {e}")
+            print(f"📋 Error type: {type(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(f"❌ Error managing participants: {str(e)}", ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"❌ Error managing participants: {str(e)}", ephemeral=True)
+            except:
+                print("❌ Failed to send error message to user")
     
     @discord.ui.button(label="Cancel Quest", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_quest(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2336,27 +2358,41 @@ class ParticipantManagementView(discord.ui.View):
     
     def add_participant_dropdown(self):
         # Create dropdown options from participant data
-        options = []
-        for i, participant in enumerate(self.participant_data):
-            # participant format: [player_name, player_rank, player_role, row_index]
-            player_name = participant[0] if len(participant) > 0 else f"Participant {i+1}"
-            player_rank = participant[1] if len(participant) > 1 else "Unknown"
-            player_role = participant[2] if len(participant) > 2 else "Unknown"
+        try:
+            options = []
+            for i, participant in enumerate(self.participant_data):
+                # participant format: [player_name, player_rank, player_role, row_index]
+                player_name = participant[0] if len(participant) > 0 else f"Participant {i+1}"
+                player_rank = participant[1] if len(participant) > 1 else "Unknown"
+                player_role = participant[2] if len(participant) > 2 else "Unknown"
+                
+                # Create display label
+                display_label = f"{player_name} ({player_rank})"
+                if len(display_label) > 100:  # Discord limit
+                    display_label = display_label[:97] + "..."
+                
+                # Create description
+                description = f"Role: {player_role}"
+                if len(description) > 100:  # Discord limit
+                    description = description[:97] + "..."
+                
+                options.append(discord.SelectOption(
+                    label=display_label,
+                    description=description,
+                    value=str(i)  # Use index as value
+                ))
             
-            # Create display label
-            display_label = f"{player_name} ({player_rank})"
-            if len(display_label) > 100:  # Discord limit
-                display_label = display_label[:97] + "..."
-            
-            options.append(discord.SelectOption(
-                label=display_label,
-                description=f"Role: {player_role}",
-                value=str(i)  # Use index as value
-            ))
-        
-        if options:
-            select = ParticipantSelect(options, self)
-            self.add_item(select)
+            if options:
+                select = ParticipantSelect(options, self)
+                self.add_item(select)
+                print(f"✅ Added dropdown with {len(options)} participant options")
+            else:
+                print("⚠️ No options to add to dropdown")
+                
+        except Exception as e:
+            print(f"❌ Error creating participant dropdown: {e}")
+            import traceback
+            traceback.print_exc()
     
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="⬅️")
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
