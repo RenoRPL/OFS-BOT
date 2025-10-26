@@ -478,9 +478,27 @@ class QuestMakerView(discord.ui.View):
         quest_id_to_check = f"P{self.guild_id}-{self.quest_id}"
         current_values = await self.quest_cog.rate_limited_api_call(worksheet.get_all_values)
         
-        for row in current_values:
-            if len(row) > 0 and row[0] == quest_id_to_check:
-                raise Exception(f"Quest {quest_id_to_check} already exists in the database. This may be a duplicate request.")
+        # If duplicate found, regenerate quest ID up to 3 times
+        retry_count = 0
+        while retry_count < 3:
+            duplicate_found = False
+            for row in current_values:
+                if len(row) > 0 and row[0] == quest_id_to_check:
+                    duplicate_found = True
+                    break
+            
+            if not duplicate_found:
+                break
+                
+            # Regenerate quest ID
+            print(f"⚠️ Quest ID {quest_id_to_check} already exists, regenerating...")
+            new_quest_id = await self.quest_cog.get_next_quest_id(self.guild_id)
+            self.quest_id = new_quest_id
+            quest_id_to_check = f"P{self.guild_id}-{self.quest_id}"
+            retry_count += 1
+        
+        if retry_count >= 3:
+            raise Exception(f"Failed to generate unique quest ID after 3 attempts. Latest attempt: {quest_id_to_check}")
         
         print(f"✅ Quest ID {quest_id_to_check} is unique, proceeding with creation")
         
@@ -3422,8 +3440,41 @@ class StartQuest(commands.Cog):
             with open(counter_file, 'w') as f:
                 json.dump({"next_id": self.next_quest_id}, f, indent=2)
     
-    def get_next_quest_id(self, guild_id: int):
-        """Get the next quest ID for a specific guild and increment counter"""
+    async def get_next_quest_id(self, guild_id: int):
+        """Get the next quest ID for a specific guild by checking Google Sheets"""
+        try:
+            # Get the Patrols worksheet to check existing quest IDs
+            worksheet = await self.get_worksheet_cached("Patrols")
+            if not worksheet:
+                print("⚠️ Patrols worksheet not found, using fallback counter")
+                return self.get_next_quest_id_fallback(guild_id)
+            
+            # Get all values from the sheet
+            current_values = await self.rate_limited_api_call(worksheet.get_all_values)
+            
+            # Find the highest existing quest ID for this guild
+            guild_prefix = f"P{guild_id}-"
+            highest_id = 1000  # Default starting point
+            
+            for row in current_values:
+                if len(row) > 0 and row[0].startswith(guild_prefix):
+                    try:
+                        # Extract the numeric part after "P{guild_id}-"
+                        quest_num = int(row[0].replace(guild_prefix, ""))
+                        if quest_num >= highest_id:
+                            highest_id = quest_num + 1
+                    except ValueError:
+                        continue  # Skip invalid quest IDs
+            
+            print(f"✅ Generated quest ID {highest_id} for guild {guild_id} (checked against Google Sheets)")
+            return highest_id
+            
+        except Exception as e:
+            print(f"⚠️ Error checking Google Sheets for quest ID, using fallback: {e}")
+            return self.get_next_quest_id_fallback(guild_id)
+    
+    def get_next_quest_id_fallback(self, guild_id: int):
+        """Fallback method using file-based counter"""
         current_counter = self.load_quest_id_counter(guild_id)
         quest_id = current_counter
         
