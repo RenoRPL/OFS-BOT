@@ -2091,6 +2091,12 @@ class ActiveQuestManageView(discord.ui.View):
             
             print(f"🔍 Looking for participants in quest: {self.join_quest_view.patrol_id}")
             print(f"📊 Total rows in sheet: {len(all_values)}")
+            print(f"🆔 Quest leader ID: {self.join_quest_view.patrol_leader.id}")
+            
+            # Debug: Show first few rows to understand structure
+            for i, row in enumerate(all_values[:5]):  # Show first 5 rows
+                patrol_id_in_row = row[0] if len(row) > 0 else "EMPTY"
+                print(f"🔍 Row {i+1}: Patrol ID = '{patrol_id_in_row}'")
             
             for i, row in enumerate(all_values[1:], start=2):  # Skip header, start from row 2
                 if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
