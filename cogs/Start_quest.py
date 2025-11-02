@@ -3634,6 +3634,19 @@ class StartQuest(commands.Cog):
         if os.path.exists(settings_file):
             with open(settings_file, 'r') as f:
                 settings = json.load(f)
+                
+                # Migration: Convert old quest_role_id to new quest_role_ids list
+                if "quest_role_id" in settings and "quest_role_ids" not in settings:
+                    if settings["quest_role_id"]:
+                        settings["quest_role_ids"] = [settings["quest_role_id"]]
+                    else:
+                        settings["quest_role_ids"] = []
+                    del settings["quest_role_id"]  # Remove old setting
+                    # Save the migrated settings
+                    self.guild_settings[guild_id] = settings
+                    self.save_settings(guild_id)
+                    print(f"✅ Migrated quest_role_id to quest_role_ids for guild {guild_id}")
+                
                 self.guild_settings[guild_id] = settings
                 return settings
         
@@ -3642,7 +3655,7 @@ class StartQuest(commands.Cog):
             "quest_review_channel": None, 
             "quest_forum_channel": None,
             "default_quest_image": "https://i.imgur.com/TZWyG45.png",
-            "quest_role_id": None  # Role ID for users who can use the quest system
+            "quest_role_ids": []  # List of role IDs for users who can use the quest system
         }
         self.guild_settings[guild_id] = default_settings
         return default_settings
@@ -3684,7 +3697,7 @@ class StartQuest(commands.Cog):
         
         # Check quest system permissions
         guild_settings = self.get_guild_settings(interaction.guild.id)
-        quest_role_id = guild_settings.get("quest_role_id")
+        quest_role_ids = guild_settings.get("quest_role_ids", [])
         
         # Check if user has permission to use quest system
         user_can_use_quests = False
@@ -3692,13 +3705,13 @@ class StartQuest(commands.Cog):
         # Always allow administrators
         if interaction.user.guild_permissions.administrator:
             user_can_use_quests = True
-        # Check for specific quest role if configured
-        elif quest_role_id:
-            user_roles = [role.id for role in interaction.user.roles]
-            if quest_role_id in user_roles:
+        # Check for specific quest roles if configured
+        elif quest_role_ids:
+            user_role_ids = [role.id for role in interaction.user.roles]
+            if any(role_id in user_role_ids for role_id in quest_role_ids):
                 user_can_use_quests = True
-        # If no quest role is configured, allow everyone
-        elif quest_role_id is None:
+        # If no quest roles are configured, allow everyone
+        elif not quest_role_ids:
             user_can_use_quests = True
         
         if not user_can_use_quests:
@@ -3733,16 +3746,14 @@ class StartQuest(commands.Cog):
     @app_commands.describe(
         quest_review_channel="Channel for quest reviews",
         quest_forum_channel="Forum channel for quests",
-        default_image="Default image URL for new quests",
-        quest_role="Role that can use the quest system (leave empty to allow everyone)"
+        default_image="Default image URL for new quests"
     )
     async def set_quest_system(
         self,
         interaction: discord.Interaction,
         quest_review_channel: Optional[discord.TextChannel] = None,
         quest_forum_channel: Optional[discord.ForumChannel] = None,
-        default_image: Optional[str] = None,
-        quest_role: Optional[discord.Role] = None
+        default_image: Optional[str] = None
     ):
         """Configure the quest system channels and default settings"""
         # Check permissions
@@ -3762,8 +3773,6 @@ class StartQuest(commands.Cog):
             guild_settings["quest_forum_channel"] = quest_forum_channel.id
         if default_image:
             guild_settings["default_quest_image"] = default_image
-        if quest_role:
-            guild_settings["quest_role_id"] = quest_role.id
         
         # Save settings for this guild
         self.save_settings(guild_id)
@@ -3774,14 +3783,179 @@ class StartQuest(commands.Cog):
             embed.add_field(name="Quest Review Channel", value=quest_review_channel.mention, inline=False)
         if quest_forum_channel:
             embed.add_field(name="Quest Forum Channel", value=quest_forum_channel.mention, inline=False)
-        if quest_role:
-            embed.add_field(name="Quest System Role", value=quest_role.mention, inline=False)
         if default_image:
             embed.add_field(name="Default Quest Image", value=f"[Click to view]({default_image})", inline=False)
+        
+        # Show current quest roles
+        quest_role_ids = guild_settings.get("quest_role_ids", [])
+        if quest_role_ids:
+            role_mentions = []
+            for role_id in quest_role_ids:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    role_mentions.append(role.mention)
+            if role_mentions:
+                embed.add_field(name="Quest System Roles", value="\n".join(role_mentions), inline=False)
+        else:
+            embed.add_field(name="Quest System Roles", value="Everyone can use quest system", inline=False)
         
         # Always show the current default image as thumbnail
         current_default_image = guild_settings.get("default_quest_image", "https://i.imgur.com/TZWyG45.png")
         embed.set_thumbnail(url=current_default_image)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="set_quest_roles", description="Set which roles can start quests")
+    @app_commands.describe(
+        action="Add or remove roles from quest permissions",
+        role="The role to add or remove"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add Role", value="add"),
+        app_commands.Choice(name="Remove Role", value="remove"),
+        app_commands.Choice(name="Clear All Roles", value="clear"),
+        app_commands.Choice(name="Auto-Setup Standard Roles", value="auto")
+    ])
+    async def set_quest_roles(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        role: Optional[discord.Role] = None
+    ):
+        """Manage which roles can start quests"""
+        # Check permissions
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need **Administrator** permissions to configure quest roles.", ephemeral=True)
+            return
+        
+        guild_id = interaction.guild.id
+        guild_settings = self.get_guild_settings(guild_id)
+        quest_role_ids = guild_settings.get("quest_role_ids", [])
+        
+        if action == "add":
+            if not role:
+                await interaction.response.send_message("❌ You must specify a role to add.", ephemeral=True)
+                return
+            
+            if role.id not in quest_role_ids:
+                quest_role_ids.append(role.id)
+                guild_settings["quest_role_ids"] = quest_role_ids
+                self.save_settings(guild_id)
+                await interaction.response.send_message(f"✅ Added {role.mention} to quest system roles.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ {role.mention} is already in quest system roles.", ephemeral=True)
+        
+        elif action == "remove":
+            if not role:
+                await interaction.response.send_message("❌ You must specify a role to remove.", ephemeral=True)
+                return
+            
+            if role.id in quest_role_ids:
+                quest_role_ids.remove(role.id)
+                guild_settings["quest_role_ids"] = quest_role_ids
+                self.save_settings(guild_id)
+                await interaction.response.send_message(f"✅ Removed {role.mention} from quest system roles.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ {role.mention} was not in quest system roles.", ephemeral=True)
+        
+        elif action == "clear":
+            guild_settings["quest_role_ids"] = []
+            self.save_settings(guild_id)
+            await interaction.response.send_message("✅ Cleared all quest system roles. Everyone can now start quests.", ephemeral=True)
+        
+        elif action == "auto":
+            # Auto-setup with the standard roles you specified
+            standard_role_names = [
+                "Primarch", "Chapter Master", "Lord Commander", "Lord", 
+                "Marshal", "Commander", "Templar", "Knight", "Squire"
+            ]
+            
+            added_roles = []
+            missing_roles = []
+            
+            for role_name in standard_role_names:
+                role_obj = discord.utils.get(interaction.guild.roles, name=role_name)
+                if role_obj:
+                    if role_obj.id not in quest_role_ids:
+                        quest_role_ids.append(role_obj.id)
+                        added_roles.append(role_obj.mention)
+                else:
+                    missing_roles.append(role_name)
+            
+            guild_settings["quest_role_ids"] = quest_role_ids
+            self.save_settings(guild_id)
+            
+            # Create response embed
+            embed = discord.Embed(title="🏛️ Auto-Setup Quest Roles", color=0x00ff00)
+            
+            if added_roles:
+                embed.add_field(
+                    name=f"✅ Added Roles ({len(added_roles)})",
+                    value="\n".join(added_roles),
+                    inline=False
+                )
+            
+            if missing_roles:
+                embed.add_field(
+                    name=f"⚠️ Missing Roles ({len(missing_roles)})",
+                    value="\n".join([f"• {name}" for name in missing_roles]),
+                    inline=False
+                )
+                embed.add_field(
+                    name="💡 Note",
+                    value="Missing roles will be ignored. Create them in your server if needed.",
+                    inline=False
+                )
+            
+            embed.set_footer(text="These roles can now start quests in addition to Administrators")
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="view_quest_roles", description="View which roles can start quests")
+    async def view_quest_roles(self, interaction: discord.Interaction):
+        """View which roles can currently start quests"""
+        guild_id = interaction.guild.id
+        guild_settings = self.get_guild_settings(guild_id)
+        quest_role_ids = guild_settings.get("quest_role_ids", [])
+        
+        embed = discord.Embed(title="🏛️ Quest System Permissions", color=0x3498db)
+        
+        # Always show that admins can use the system
+        embed.add_field(name="👑 Administrators", value="Can always start quests", inline=False)
+        
+        if quest_role_ids:
+            role_mentions = []
+            missing_roles = []
+            
+            for role_id in quest_role_ids:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    role_mentions.append(f"• {role.mention}")
+                else:
+                    missing_roles.append(f"• Missing Role (ID: {role_id})")
+            
+            if role_mentions:
+                embed.add_field(
+                    name=f"🎖️ Authorized Roles ({len(role_mentions)})",
+                    value="\n".join(role_mentions),
+                    inline=False
+                )
+            
+            if missing_roles:
+                embed.add_field(
+                    name="⚠️ Invalid Roles",
+                    value="\n".join(missing_roles),
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="🌐 Public Access",
+                value="Everyone can start quests",
+                inline=False
+            )
+        
+        # Add helpful footer
+        embed.set_footer(text="Use /set_quest_roles to modify quest permissions")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
