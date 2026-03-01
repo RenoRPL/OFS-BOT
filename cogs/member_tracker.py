@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import discord
 from discord.ext import commands, tasks
 import gspread
@@ -7,56 +8,49 @@ import json
 import asyncio
 from datetime import datetime
 import traceback
-from utils.google_auth import get_google_credentials
+from utils.google_auth import get_google_credentials, open_spreadsheet
 
 class MemberTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # LAZY: sheet is opened on first use (in a thread), not at startup
         self.gc = None
-        self.SHEET_URL = None
+        self.sheet = None
         self.MEMBER_LOG_WORKSHEET = "Discord Member Log"
-        
-        # Load configuration
-        self.load_config()
-        
-        # Initialize Google Sheets
-        self.init_google_sheets()
-        
-        # Start the periodic task
-        self.member_scan_task.start()
+
+        # Read ENV to check if we're in staging
+        self.env = os.getenv("ENV", "production").strip().lower()
+
+        # Start the periodic task ONLY if not in staging mode
+        if self.env != "staging":
+            self.member_scan_task.start()
+            print("[INFO] Member tracker background task enabled (production mode)")
+        else:
+            print("[STAGING] Member tracker background task DISABLED - use manual scan only")
     
-    def load_config(self):
-        """Load configuration - using the same Google Sheets URL as quest tracker"""
-        # Use the same Google Sheets URL as the quest tracker
-        self.SHEET_URL = "https://docs.google.com/spreadsheets/d/12OiRHpEALj1hzXRxaXgBOWjHtmUT5hg2ztxIgr4J4y8"
-        print(f"✅ Member Tracker: Using Google Sheets URL: {self.SHEET_URL[:50]}...")
-    
+    def _ensure_sheet(self):
+        """Lazy-open spreadsheet on first use (runs in a thread, never at startup)."""
+        if self.sheet is None:
+            self.sheet = open_spreadsheet()
+        return self.sheet
+
     def init_google_sheets(self):
-        """Initialize Google Sheets connection"""
-        try:
-            self.gc = get_google_credentials()
-            if self.gc:
-                print("✅ Member Tracker: Google Sheets integration ready")
-            else:
-                print("⚠️ Member Tracker: Google Sheets disabled - no credentials available")
-        except Exception as e:
-            print(f"❌ Member Tracker: Failed to initialize Google Sheets: {e}")
+        """DEPRECATED: kept for compat. Use _ensure_sheet() instead."""
+        self._ensure_sheet()
     
-    def get_worksheet(self, sheet_url: str, worksheet_name: str):
+    def get_worksheet(self, worksheet_name: str):
         """Get or create a worksheet"""
         try:
-            if not self.gc or not sheet_url:
+            if not self._ensure_sheet():
                 return None
-                
-            sheet = self.gc.open_by_url(sheet_url)
-            
+
             # Try to get existing worksheet
             try:
-                worksheet = sheet.worksheet(worksheet_name)
+                worksheet = self.sheet.worksheet(worksheet_name)
                 return worksheet
             except gspread.exceptions.WorksheetNotFound:
                 # Create new worksheet if it doesn't exist
-                worksheet = sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+                worksheet = self.sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
                 
                 # Add headers
                 headers = [
@@ -92,16 +86,16 @@ class MemberTracker(commands.Cog):
     
     async def scan_all_members(self):
         """Scan all members across all guilds and update the spreadsheet"""
-        if not self.gc or not self.SHEET_URL:
+        if not self._ensure_sheet():
             print("❌ Google Sheets not initialized")
             return
-        
+
         # Check if members intent is enabled
         if not self.bot.intents.members:
             print("❌ Members intent not enabled. Enable it in Discord Developer Portal and bot.py")
             return
-        
-        worksheet = self.get_worksheet(self.SHEET_URL, self.MEMBER_LOG_WORKSHEET)
+
+        worksheet = self.get_worksheet(self.MEMBER_LOG_WORKSHEET)
         if not worksheet:
             print("❌ Could not access Member Log worksheet")
             return

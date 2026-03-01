@@ -46,5 +46,13 @@
     "length": 60,
     "scroll": "\ud83d\udcdc",
     "game": "Star Citizen"
+  },
+  "Call of the Citadel": {
+    "name": "Call of the Citadel",
+    "description": "Those who serve within the Citadel, together with all members of the Order, are called to rendezvous at Port Tressler in response to current operations and events. This assembly exists to coordinate action, strengthen readiness, and ensure the Order advances in unity.",
+    "image": "https://cdn.discordapp.com/attachments/1421285572730814465/1470923742040297747/Perseus_angled_combat.png?ex=698d0ffc&is=698bbe7c&hm=6845dfaf89ace9e2b3902d673ccdba72d58bdc80d5e3124b2cb3a0dfd5156afb&",
+    "length": 60,
+    "scroll": "\ud83d\udcdc",
+    "game": "Star Citizen"
   }
 }

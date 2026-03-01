@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import asyncio
 from datetime import datetime
-from utils.google_auth import get_google_credentials
+from utils.google_auth import open_spreadsheet
 
 class QuestMakerView(discord.ui.View):
     def __init__(self, leader: discord.Member, game: str, quest_id: int, guild_id: int, quest_cog, leader_info: dict, quest_type: str = "Quest"):
@@ -20,7 +20,7 @@ class QuestMakerView(discord.ui.View):
         self.quest_id = quest_id
         self.guild_id = guild_id
         self.quest_cog = quest_cog
-        self.leader_info = leader_info  # Contains rank and role from Member Log
+        self.leader_info = leader_info  # Contains rank and banner from Member Log
         self.quest_name = ""
         self.quest_description = ""
         # Get guild-specific default image
@@ -341,7 +341,7 @@ class QuestMakerView(discord.ui.View):
         embed.add_field(name="Quest ID", value=f"`{self.quest_id}`", inline=True)
         embed.add_field(name="Quest Duration", value=f"{self.quest_length} minutes", inline=True)
         embed.add_field(name="Rank:", value=self.leader_info.get("rank", "Unknown"), inline=True)
-        embed.add_field(name="Role:", value=self.leader_info.get("role", "Unknown"), inline=True)
+        embed.add_field(name="Banner:", value=self.leader_info.get("banner", "Unassigned"), inline=True)
         
         # Use current local time as the actual quest creation time (matching quest_tracker approach)
         embed.add_field(name="Quest Created", value=f"<t:{int(datetime.now().timestamp())}:R>", inline=True)
@@ -466,7 +466,7 @@ class QuestMakerView(discord.ui.View):
     
     async def save_quest_to_sheets(self):
         """Save the quest data to Google Sheets"""
-        if not self.quest_cog.gc or not self.quest_cog.sheet:
+        if not await self.quest_cog._ensure_sheet():
             raise Exception("Google Sheets not configured")
         
         # Get Patrols worksheet
@@ -519,7 +519,7 @@ class QuestMakerView(discord.ui.View):
             self.quest_length,         # Patrol actual Length
             "",                        # Player ID (empty for now)
             "",                        # Player Name (empty for now)
-            "",                        # Player Role (empty for now)
+            "",                        # Player Banner (empty for now)
             "",                        # Player Rank (empty for now)
             "",                        # Quest (empty for now)
             "",                        # Fps kills (empty for now)
@@ -1347,23 +1347,33 @@ class JoinQuestView(discord.ui.View):
             # Look up member data from Member Log tab (outside lock for performance)
             member_log_worksheet = await self.quest_cog.get_worksheet_cached("Member Log")
             member_data = {
-                "role": "Member",
+                "banner": "Unassigned",
                 "rank": "Member"
             }
-            
+
             if member_log_worksheet:
                 try:
                     member_log_values = await self.quest_cog.rate_limited_api_call(member_log_worksheet.get_all_values)
+                    # Header-based lookup for Banner column
+                    headers = member_log_values[0] if member_log_values else []
+                    banner_col_idx = None
+                    rank_col_idx = None
+                    for idx, header in enumerate(headers):
+                        header_lower = header.strip().lower()
+                        if header_lower == "banner":
+                            banner_col_idx = idx
+                        elif header_lower == "rank":
+                            rank_col_idx = idx
+
                     # Look for the user's Discord ID in the Member Log
                     for row in member_log_values[1:]:  # Skip header row
                         # Check both column A (User ID) and column B (Discord ID) for the user ID
-                        if ((len(row) > 0 and str(interaction.user.id) == str(row[0])) or 
+                        if ((len(row) > 0 and str(interaction.user.id) == str(row[0])) or
                             (len(row) > 1 and str(interaction.user.id) == str(row[1]))):
-                            # Member Log columns: [C:Rank, D:Role]
-                            if len(row) > 2:
-                                member_data["rank"] = row[2] if row[2] else "Member"  # C: Rank
-                            if len(row) > 3:
-                                member_data["role"] = row[3] if row[3] else "Member"  # D: Role
+                            if rank_col_idx is not None and len(row) > rank_col_idx:
+                                member_data["rank"] = row[rank_col_idx] if row[rank_col_idx] else "Member"
+                            if banner_col_idx is not None and len(row) > banner_col_idx:
+                                member_data["banner"] = row[banner_col_idx] if row[banner_col_idx] else "Unassigned"
                             break
                 except Exception as e:
                     print(f"Error reading Member Log: {e}")
@@ -1505,7 +1515,7 @@ class JoinQuestView(discord.ui.View):
                 "❓",                                          # J: Quest actual end time
                 str(interaction.user.id),                    # K: Player ID
                 interaction.user.display_name,               # L: Player Name
-                member_data["role"],                         # M: Player Role
+                member_data["banner"],                       # M: Player Banner
                 member_data["rank"],                         # N: Player Rank
                 quest_points,                                # O: Quest Points (1 if Quest, ❓ if Crusade)
                 "❓",                                          # P: Ground Kills (reserved)
@@ -1615,8 +1625,8 @@ class JoinQuestView(discord.ui.View):
                 notification_embed.add_field(name="Rank", value=member_data["rank"], inline=True)
                 print(f"⚠️ No valid rank icon URL for notification embed")
             
-            # Always add role as second field inline with rank
-            notification_embed.add_field(name="Role", value=member_data["role"], inline=True)
+            # Always add banner as second field inline with rank
+            notification_embed.add_field(name="Banner", value=member_data["banner"], inline=True)
             
             # Set footer with the "New Quest Member" text
             notification_embed.set_footer(text="🆕 New Quest Member")
@@ -1785,7 +1795,7 @@ class ActiveQuestManageView(discord.ui.View):
                         print(f"Failed to apply quest completed tag: {e}")
             
             # Create completion embed using the same format as Record Points but for completion
-            # Get quest details and all player data with proper rank/role system
+            # Get quest details and all player data with proper rank/banner system
             member_log_worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Member Log")
             
             # Get Member Log data for rank lookups
@@ -1811,7 +1821,7 @@ class ActiveQuestManageView(discord.ui.View):
             
             # Find quest details and leader rank from database
             leader_rank = ""
-            leader_role = ""
+            leader_banner = ""
             leader_id = ""
             quest_emoji = "🎉"  # Default emoji
             quest_type = "Quest"  # Default quest type
@@ -1840,16 +1850,23 @@ class ActiveQuestManageView(discord.ui.View):
                             pass
                     break
             
-            # Get leader role from Member Log using leader ID
+            # Get leader banner from Member Log using leader ID
             if leader_id and member_log_worksheet:
                 try:
                     member_log_values = await self.join_quest_view.quest_cog.rate_limited_api_call(member_log_worksheet.get_all_values)
+                    # Header-based lookup for Banner column
+                    headers = member_log_values[0] if member_log_values else []
+                    banner_col_idx = None
+                    for idx, header in enumerate(headers):
+                        if header.strip().lower() == "banner":
+                            banner_col_idx = idx
+                            break
                     for row in member_log_values[1:]:  # Skip header row
                         if len(row) > 0 and str(row[0]) == str(leader_id):  # Column A: Discord ID
-                            leader_role = row[3] if len(row) > 3 else ""  # Column D: Role
+                            leader_banner = row[banner_col_idx] if banner_col_idx is not None and len(row) > banner_col_idx else ""
                             break
                 except Exception as e:
-                    print(f"Error getting leader role from Member Log: {e}")
+                    print(f"Error getting leader banner from Member Log: {e}")
             
             # Calculate quest duration
             duration_text = "Unknown"
@@ -1881,15 +1898,15 @@ class ActiveQuestManageView(discord.ui.View):
                         player_name = row[11] if len(row) > 11 else ""
                         
                         if player_id and player_name:
-                            # Get rank and role from the correct columns
-                            player_role = row[12] if len(row) > 12 else ""  # Column M: Player Role
+                            # Get rank and banner from the correct columns
+                            player_banner = row[12] if len(row) > 12 else ""  # Column M: Player Banner
                             player_rank = row[13] if len(row) > 13 else ""  # Column N: Player Rank
                             
-                            # Use rank if available, otherwise use role, otherwise default to "Member"
+                            # Use rank if available, otherwise use banner, otherwise default to "Member"
                             if player_rank and player_rank.strip():
                                 display_rank = player_rank
-                            elif player_role and player_role.strip():
-                                display_rank = player_role
+                            elif player_banner and player_banner.strip():
+                                display_rank = player_banner
                             else:
                                 display_rank = "Member"
                             
@@ -1923,7 +1940,7 @@ class ActiveQuestManageView(discord.ui.View):
                                 'player_name': player_name,
                                 'player_id': player_id,
                                 'player_rank': player_rank,  # Use rank from Google Sheets column N
-                                'player_role': row[12] if len(row) > 12 else "",  # Column M: Player Role
+                                'player_banner': row[12] if len(row) > 12 else "",  # Column M: Player Banner
                                 'time_in_quest': time_in_quest,
                                 'quest_points': quest_points,
                                 'ground_kills': ground_kills,
@@ -1934,14 +1951,14 @@ class ActiveQuestManageView(discord.ui.View):
             except Exception as e:
                 print(f"Error getting quest participants: {e}")
             
-            # Format leader display with rank and role on separate lines
+            # Format leader display with rank and banner on separate lines
             leader_display = f"**Leader:** {leader_name}"
-            if leader_rank and leader_rank.strip() and leader_role and leader_role.strip():
-                leader_display += f"\n**Rank:** {leader_rank} | **Role:** {leader_role}"
+            if leader_rank and leader_rank.strip() and leader_banner and leader_banner.strip():
+                leader_display += f"\n**Rank:** {leader_rank} | **Banner:** {leader_banner}"
             elif leader_rank and leader_rank.strip():
                 leader_display += f"\n**Rank:** {leader_rank}"
-            elif leader_role and leader_role.strip():
-                leader_display += f"\n**Role:** {leader_role}"
+            elif leader_banner and leader_banner.strip():
+                leader_display += f"\n**Banner:** {leader_banner}"
             
             # Extract just the 4-digit quest number from patrol_id (e.g., P533127850409328670-1082 -> 1082)
             quest_number = self.join_quest_view.patrol_id.split('-')[-1] if '-' in self.join_quest_view.patrol_id else self.join_quest_view.patrol_id
@@ -1972,7 +1989,7 @@ class ActiveQuestManageView(discord.ui.View):
             await self.update_forum_thread_with_completed_tag(interaction)
             
             # Update Google Sheets with completion timestamp and send to admin review
-            await self.send_quest_for_admin_review(display_quest_name, leader_name, leader_rank, leader_role, completed_quest_players, quest_image)
+            await self.send_quest_for_admin_review(display_quest_name, leader_name, leader_rank, leader_banner, completed_quest_players, quest_image)
             
         except Exception as e:
             print(f"Error completing quest: {e}")
@@ -2113,18 +2130,18 @@ class ActiveQuestManageView(discord.ui.View):
                     matching_rows += 1
                     player_id = row[10] if len(row) > 10 else ""     # K: Player ID
                     player_name = row[11] if len(row) > 11 else ""   # L: Player Name
-                    player_role = row[12] if len(row) > 12 else ""   # M: Player Role
+                    player_banner = row[12] if len(row) > 12 else ""   # M: Player Banner
                     player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
                     
-                    print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Role={player_role}, Rank={player_rank}")
+                    print(f"📝 Found quest row {i}: ID={player_id}, Name={player_name}, Banner={player_banner}, Rank={player_rank}")
                     debug_info += f"• Row {i}: ID={player_id}, Name={player_name}\n"
-                    
-                    # For testing: Include ALL participants (including quest leader) 
+
+                    # For testing: Include ALL participants (including quest leader)
                     # TODO: Remove quest leader inclusion after testing
                     if player_id and player_name and player_id != "❓":
-                        # Format as [player_name, player_rank, player_role, row_index] for ParticipantManagementView
-                        participant_data.append([player_name, player_rank, player_role, i])  # Add row index for deletion
-                        print(f"✅ Added participant: {player_name} ({player_rank}) - {player_role}")
+                        # Format as [player_name, player_rank, player_banner, row_index] for ParticipantManagementView
+                        participant_data.append([player_name, player_rank, player_banner, i])  # Add row index for deletion
+                        print(f"✅ Added participant: {player_name} ({player_rank}) - {player_banner}")
                         if player_id == str(self.join_quest_view.patrol_leader.id):
                             print(f"⚠️ Note: This is the quest leader (included for testing)")
             
@@ -2160,8 +2177,8 @@ class ActiveQuestManageView(discord.ui.View):
             for i, participant in enumerate(participant_data, 1):
                 player_name = participant[0]
                 player_rank = participant[1] if participant[1] else "Unknown"
-                player_role = participant[2] if participant[2] else "Unknown"
-                participant_list += f"**{i}.** {player_name} ({player_rank}) - {player_role}\n"
+                player_banner = participant[2] if participant[2] else "Unassigned"
+                participant_list += f"**{i}.** {player_name} ({player_rank}) - {player_banner}\n"
             
             embed.add_field(name=f"Participants ({len(participant_data)})", value=participant_list, inline=False)
             embed.set_footer(text="⚠️ Removing a participant will permanently delete their quest data!")
@@ -2247,15 +2264,15 @@ class ActiveQuestManageView(discord.ui.View):
                     player_name = row[11] if len(row) > 11 else ""  # Column L: Player Name
                     
                     if player_id and player_name:  # Skip leader row or empty player data
-                        # Get rank and role from the correct columns
-                        player_role = row[12] if len(row) > 12 else ""  # Column M: Player Role
+                        # Get rank and banner from the correct columns
+                        player_banner = row[12] if len(row) > 12 else ""  # Column M: Player Banner
                         player_rank = row[13] if len(row) > 13 else ""  # Column N: Player Rank
                         
-                        # Use rank if available, otherwise use role, otherwise default to "Member"
+                        # Use rank if available, otherwise use banner, otherwise default to "Member"
                         if player_rank and player_rank.strip():
                             display_rank = player_rank
-                        elif player_role and player_role.strip():
-                            display_rank = player_role
+                        elif player_banner and player_banner.strip():
+                            display_rank = player_banner
                         else:
                             display_rank = "Member"
                             
@@ -2303,7 +2320,7 @@ class ActiveQuestManageView(discord.ui.View):
                             'player_id': player_id,
                             'player_name': player_name,
                             'player_rank': player_rank,
-                            'player_role': player_role,
+                            'player_banner': player_banner,
                             'time_in_quest': time_in_quest,
                             'points_recorded': kill_stats_recorded,
                             'current_quest_points': quest_points,
@@ -2358,14 +2375,14 @@ class ActiveQuestManageView(discord.ui.View):
                         
                         embed.add_field(
                             name=f"{i+1}. {player['player_name']} {status_icon}",
-                            value=f"**Rank:** {player['player_rank']} | **Role:** {player['player_role']}\n**Time:** {player['time_in_quest']}\n**Points:** {points_text}",
+                            value=f"**Rank:** {player['player_rank']} | **Banner:** {player['player_banner']}\n**Time:** {player['time_in_quest']}\n**Points:** {points_text}",
                             inline=True
                         )
                     else:
                         # Show awaiting status
                         embed.add_field(
                             name=f"{i+1}. {player['player_name']} {status_icon}",
-                            value=f"**Rank:** {player['player_rank']} | **Role:** {player['player_role']}\n**Time:** {player['time_in_quest']}\n**Status:** Awaiting recording",
+                            value=f"**Rank:** {player['player_rank']} | **Banner:** {player['player_banner']}\n**Time:** {player['time_in_quest']}\n**Status:** Awaiting recording",
                             inline=True
                         )
                 
@@ -2411,18 +2428,18 @@ class ParticipantManagementView(discord.ui.View):
         try:
             options = []
             for i, participant in enumerate(self.participant_data):
-                # participant format: [player_name, player_rank, player_role, row_index]
+                # participant format: [player_name, player_rank, player_banner, row_index]
                 player_name = participant[0] if len(participant) > 0 else f"Participant {i+1}"
                 player_rank = participant[1] if len(participant) > 1 else "Unknown"
-                player_role = participant[2] if len(participant) > 2 else "Unknown"
-                
+                player_banner = participant[2] if len(participant) > 2 else "Unassigned"
+
                 # Create display label
                 display_label = f"{player_name} ({player_rank})"
                 if len(display_label) > 100:  # Discord limit
                     display_label = display_label[:97] + "..."
-                
+
                 # Create description
-                description = f"Role: {player_role}"
+                description = f"Banner: {player_banner}"
                 if len(description) > 100:  # Discord limit
                     description = description[:97] + "..."
                 
@@ -2485,8 +2502,8 @@ class ParticipantSelect(discord.ui.Select):
             # Create confirmation embed
             player_name = selected_participant[0] if len(selected_participant) > 0 else "Unknown"
             player_rank = selected_participant[1] if len(selected_participant) > 1 else "Unknown"
-            player_role = selected_participant[2] if len(selected_participant) > 2 else "Unknown"
-            
+            player_banner = selected_participant[2] if len(selected_participant) > 2 else "Unassigned"
+
             embed = discord.Embed(
                 title="⚠️ Confirm Participant Removal",
                 description=f"Are you sure you want to remove this participant from the quest?",
@@ -2494,7 +2511,7 @@ class ParticipantSelect(discord.ui.Select):
             )
             embed.add_field(name="Player Name", value=player_name, inline=True)
             embed.add_field(name="Rank", value=player_rank, inline=True)
-            embed.add_field(name="Role", value=player_role, inline=True)
+            embed.add_field(name="Banner", value=player_banner, inline=True)
             embed.add_field(
                 name="⚠️ Warning", 
                 value="This action cannot be undone. All patrol data for this participant will be permanently removed.",
@@ -2530,7 +2547,7 @@ class ParticipantRemoveConfirmView(discord.ui.View):
                 return
             
             # Get the actual row index from the participant data
-            # participant_data format: [player_name, player_rank, player_role, row_index]
+            # participant_data format: [player_name, player_rank, player_banner, row_index]
             participant_row = self.participant_data[3]  # The row index we stored earlier
             
             # Get the user ID before deleting the row
@@ -2656,30 +2673,30 @@ class ParticipantRemoveConfirmView(discord.ui.View):
                 if len(row) > 0 and row[0] == join_quest_view.patrol_id:
                     player_id = row[10] if len(row) > 10 else ""     # K: Player ID
                     player_name = row[11] if len(row) > 11 else ""   # L: Player Name
-                    player_role = row[12] if len(row) > 12 else ""   # M: Player Role
+                    player_banner = row[12] if len(row) > 12 else ""   # M: Player Banner
                     player_rank = row[13] if len(row) > 13 else ""   # N: Player Rank
                     
                     # Skip the quest leader row (they have different data structure)
                     if player_id and player_name and player_id != "❓" and player_id != str(join_quest_view.patrol_leader.id):
-                        participant_data.append([player_name, player_rank, player_role, i])
-            
+                        participant_data.append([player_name, player_rank, player_banner, i])
+
             # Return to participant management
             participant_view = ParticipantManagementView(self.quest_manage_view, participant_data)
-            
+
             # Create participant management embed
             embed = discord.Embed(
                 title="👥 Manage Quest Participants",
                 description="Select a participant to remove from the quest.",
                 color=0x3498db
             )
-            
+
             if participant_data:
                 participant_list = []
                 for i, participant in enumerate(participant_data):
                     player_name = participant[0] if len(participant) > 0 else f"Participant {i+1}"
                     player_rank = participant[1] if len(participant) > 1 else "Unknown"
-                    player_role = participant[2] if len(participant) > 2 else "Unknown"
-                    participant_list.append(f"**{player_name}** ({player_rank}) - {player_role}")
+                    player_banner = participant[2] if len(participant) > 2 else "Unassigned"
+                    participant_list.append(f"**{player_name}** ({player_rank}) - {player_banner}")
                 
                 embed.add_field(
                     name=f"Current Participants ({len(participant_data)})",
@@ -2893,21 +2910,21 @@ class QuestCompleteConfirmView(discord.ui.View):
         )
         await interaction.response.edit_message(embed=manage_embed, view=manage_view)
 
-    async def send_quest_for_admin_review(self, quest_name, leader_name, leader_rank, leader_role, completed_quest_players, quest_image):
+    async def send_quest_for_admin_review(self, quest_name, leader_name, leader_rank, leader_banner, completed_quest_players, quest_image):
         """Send completed quest data to admin review channel and update completion timestamp"""
         try:
             # Update Google Sheets with completion timestamp (Column AE)
             worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
             if worksheet:
                 all_values = await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
-                
+
                 for i, row in enumerate(all_values):
                     if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
                         quest_row_index = i + 1  # +1 because sheet rows are 1-indexed
-                        
+
                         # Update column AE (Quest Completed) with timestamp
                         completion_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        
+
                         # Column AE is the 31st column (A=1, B=2, ..., AE=31)
                         await self.join_quest_view.quest_cog.rate_limited_api_call(
                             worksheet.update,
@@ -2916,19 +2933,19 @@ class QuestCompleteConfirmView(discord.ui.View):
                         )
                         print(f"✅ Updated Quest Completed timestamp for {self.join_quest_view.patrol_id}")
                         break
-            
+
             # Send to review channels in ALL guilds
             for guild in self.join_quest_view.quest_cog.bot.guilds:
                 guild_settings = self.join_quest_view.quest_cog.get_guild_settings(guild.id)
                 review_channel_id = guild_settings.get("quest_review_channel")
-                
+
                 if review_channel_id:
                     review_channel = self.join_quest_view.quest_cog.bot.get_channel(review_channel_id)
-                    
+
                     if review_channel:
                         # Get quest number for display
                         quest_number = self.join_quest_view.patrol_id.split('-')[-1] if '-' in self.join_quest_view.patrol_id else self.join_quest_view.patrol_id
-                        
+
                         # Get quest description from the first message in the thread
                         quest_description = "Quest completed - awaiting admin review"
                         quest_thread = self.join_quest_view.quest_cog.bot.get_channel(int(self.join_quest_view.patrol_id.split('-')[-1]))
@@ -2939,29 +2956,29 @@ class QuestCompleteConfirmView(discord.ui.View):
                                     if message.embeds:
                                         first_message = message
                                         break
-                                
+
                                 if first_message and first_message.embeds:
                                     embed = first_message.embeds[0]
                                     if embed.description:
                                         quest_description = embed.description
                             except Exception as e:
                                 print(f"Could not retrieve quest description: {e}")
-                        
+
                         # Create comprehensive admin review embed
                         review_embed = discord.Embed(
                             title="🎯 Quest Results Review",
                             description=f"**{quest_name}**\n{quest_description}",
                             color=0x00ff00
                         )
-                        
+
                         # Add quest leader information
                         leader_info = f"**{leader_name}**"
-                        if leader_rank and leader_role:
-                            leader_info += f"\n{leader_rank} | {leader_role}"
+                        if leader_rank and leader_banner:
+                            leader_info += f"\n{leader_rank} | {leader_banner}"
                         elif leader_rank:
                             leader_info += f"\n{leader_rank}"
-                        elif leader_role:
-                            leader_info += f"\n{leader_role}"
+                        elif leader_banner:
+                            leader_info += f"\n{leader_banner}"
                         
                         review_embed.add_field(name="🎖️ Quest Leader", value=leader_info, inline=True)
                         
@@ -2997,11 +3014,11 @@ class QuestCompleteConfirmView(discord.ui.View):
                             
                             # Format player line
                             player_rank = player.get('player_rank', 'Unknown')
-                            player_role = player.get('player_role', 'Unknown')
-                            
+                            player_banner = player.get('player_banner', 'Unassigned')
+
                             player_line = f"**{i}. {player['player_name']}** - Rank: {player_rank}"
-                            if player_role and player_role != 'Unknown':
-                                player_line += f" | Role: {player_role}"
+                            if player_banner and player_banner != 'Unassigned':
+                                player_line += f" | Banner: {player_banner}"
                             player_line += f"\n📜 {player['quest_points']} | 🏛️ {player['crusade_points']} | 🔫 {player['ground_kills']} | 🚀 {player['pilot_kills']} | 💀 {player['griefer_kills']}\n\n"
                             
                             # Check if adding this player would exceed Discord's field limit
@@ -3042,15 +3059,42 @@ class QuestCompleteConfirmView(discord.ui.View):
                     
                     # Create review view with approve/adjust buttons
                     review_view = QuestReviewView(self.join_quest_view.patrol_id, quest_name, self.join_quest_view.quest_cog)
-                    
-                    # Send to admin review channel
-                    await review_channel.send(embed=review_embed, view=review_view)
-                    print(f"✅ Sent quest {self.join_quest_view.patrol_id} for admin review")
+
+                    # Send to admin review channel with fallback handling
+                    try:
+                        await review_channel.send(embed=review_embed, view=review_view)
+                        print(f"✅ Sent quest {self.join_quest_view.patrol_id} for admin review")
+                    except discord.HTTPException as http_err:
+                        # Fallback: Send minimal summary embed if full embed fails
+                        print(f"⚠️ HTTPException sending review embed for {self.join_quest_view.patrol_id}: {http_err}. Falling back to summary embed.")
+
+                        fallback_embed = discord.Embed(
+                            title="🎯 Quest Results Review",
+                            description=f"**{quest_name}**\n\n*Full roster too large - see thread for details*",
+                            color=0xFFA500  # Orange to indicate fallback
+                        )
+                        fallback_embed.add_field(name="🎖️ Quest Leader", value=f"**{leader_name}**", inline=True)
+                        fallback_embed.add_field(name="👥 Participants", value=f"{len(completed_quest_players)} players", inline=True)
+                        fallback_embed.add_field(
+                            name="📊 Summary",
+                            value=f"Quest Pts: {total_quest_points} | Crusade: {total_crusade_points}\nGround: {total_ground_kills} | Pilot: {total_pilot_kills} | Turret: {total_griefer_kills}",
+                            inline=False
+                        )
+                        fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review and approve below")
+
+                        if quest_image and quest_image.startswith(('http://', 'https://')):
+                            fallback_embed.set_thumbnail(url=quest_image)
+
+                        try:
+                            await review_channel.send(embed=fallback_embed, view=review_view)
+                            print(f"✅ Sent FALLBACK embed for quest {self.join_quest_view.patrol_id}")
+                        except discord.HTTPException as fallback_err:
+                            print(f"❌ CRITICAL: Even fallback embed failed for {self.join_quest_view.patrol_id}: {fallback_err}")
                 else:
                     print("⚠️ Quest review channel not found")
             else:
                 print("⚠️ No quest review channel configured")
-                
+
         except Exception as e:
             print(f"Error sending quest for admin review: {e}")
 
@@ -3181,11 +3225,8 @@ class StartQuest(commands.Cog):
         
         # Quest ID counters are now guild-specific (no global counter needed)
         
-        # Google Sheets setup
-        self.gc = None
+        # LAZY: sheet is opened on first use (in a thread), not at startup
         self.sheet = None
-        self.SHEET_URL = "https://docs.google.com/spreadsheets/d/12OiRHpEALj1hzXRxaXgBOWjHtmUT5hg2ztxIgr4J4y8"
-        self.setup_google_sheets()
         
         # Sophisticated cache system
         self.data_cache = {}
@@ -3198,25 +3239,23 @@ class StartQuest(commands.Cog):
         
         # Register persistent views
         self.register_persistent_views()
-        
-        print("✅ Quest system initialized with cache and Google Sheets")
+
+        print("[OK] Quest system initialized with cache and Google Sheets")
     
+    async def _ensure_sheet(self):
+        """Lazy-open spreadsheet on first use (runs in a thread, never blocks event loop)."""
+        if self.sheet is None:
+            self.sheet = await asyncio.to_thread(open_spreadsheet)
+        return self.sheet
+
     def setup_google_sheets(self):
-        """Setup Google Sheets connection"""
-        try:
-            self.gc = get_google_credentials()
-            if self.gc:
-                self.sheet = self.gc.open_by_url(self.SHEET_URL)
-                print("✅ Google Sheets integration ready")
-            else:
-                print("⚠️ Google Sheets disabled - no credentials available")
-        except Exception as e:
-            print(f"❌ Google Sheets setup failed: {e}")
+        """DEPRECATED: no-op. Sheets are now opened lazily via _ensure_sheet()."""
+        pass
     
     def register_persistent_views(self):
         """Register persistent views that survive bot restarts"""
         async def setup_views():
-            if not self.gc or not self.sheet:
+            if not await self._ensure_sheet():
                 return
             
             try:
@@ -3334,13 +3373,13 @@ class StartQuest(commands.Cog):
                         else:
                             display_quest_name = quest_name
                     
-                    # Get member info: [K:Player ID, L:Player Name, M:Role, N:Rank, V:Join Time]
-                    player_id = row[10] if len(row) > 10 else "❓"  # K: Player ID  
+                    # Get member info: [K:Player ID, L:Player Name, M:Banner, N:Rank, V:Join Time]
+                    player_id = row[10] if len(row) > 10 else "❓"  # K: Player ID
                     player_name = row[11] if len(row) > 11 else "❓"  # L: Player Name
-                    role = row[12] if len(row) > 12 else "Member"  # M: Role
+                    banner = row[12] if len(row) > 12 else "Unassigned"  # M: Banner
                     rank = row[13] if len(row) > 13 else "Member"  # N: Rank
                     join_time_str = row[21] if len(row) > 21 else "❓"  # V: Join Time
-                    
+
                     # Only include rows that have a player ID (actual members)
                     if player_id and player_name and player_id != "❓":
                         # Parse join time
@@ -3352,11 +3391,11 @@ class StartQuest(commands.Cog):
                                 join_time = int(datetime.now().timestamp())
                         except:
                             join_time = int(datetime.now().timestamp())
-                        
+
                         quest_members.append({
                             'name': player_name,
                             'rank': rank,
-                            'role': role,
+                            'banner': banner,
                             'join_time': join_time,
                             'player_id': player_id
                         })
@@ -3376,7 +3415,7 @@ class StartQuest(commands.Cog):
                 member_list = ""
                 for i, member in enumerate(quest_members, 1):
                     member_list += f"**{i}.** {member['name']}\n"
-                    member_list += f"└ **Rank:** {member['rank']} | **Role:** {member['role']}\n"
+                    member_list += f"└ **Rank:** {member['rank']} | **Banner:** {member['banner']}\n"
                     member_list += f"└ **Joined:** <t:{member['join_time']}:R>\n\n"
                 
                 # Add members field
@@ -3414,7 +3453,7 @@ class StartQuest(commands.Cog):
             await asyncio.sleep(self.api_call_delay - time_since_last)
         
         try:
-            result = func(*args, **kwargs)
+            result = await asyncio.to_thread(func, *args, **kwargs)
             self.last_api_call = time.time()
             return result
         except Exception as e:
@@ -3462,7 +3501,7 @@ class StartQuest(commands.Cog):
                 return self.worksheet_cache[cache_key]
         
         # Fetch fresh worksheet
-        if not self.gc or not self.sheet:
+        if not await self._ensure_sheet():
             return None
         
         try:
@@ -3497,35 +3536,47 @@ class StartQuest(commands.Cog):
             return []
     
     async def lookup_member_info(self, member_id: str):
-        """Lookup member rank and role from Member Log"""
+        """Lookup member rank and banner from Member Log"""
         cache_key = f"member_{member_id}"
-        
+
         # Check cache first
         cached_info = self.get_cached_data(cache_key)
         if cached_info is not None:
             return cached_info
-        
+
         # Fetch from Member Log
         member_log_data = await self.get_worksheet_data_cached("Member Log")
         if not member_log_data:
-            return {"rank": "Member", "role": "Member"}
-        
+            return {"rank": "Member", "banner": "Unassigned"}
+
+        # Header-based lookup for Banner column
+        headers = member_log_data[0] if member_log_data else []
+        banner_col_idx = None
+        rank_col_idx = None
+
+        for idx, header in enumerate(headers):
+            header_lower = header.strip().lower()
+            if header_lower == "banner":
+                banner_col_idx = idx
+            elif header_lower == "rank":
+                rank_col_idx = idx
+
         # Look for member in the data
         for row in member_log_data[1:]:  # Skip header
-            if len(row) >= 3:  # Ensure we have enough columns
+            if len(row) >= 1:
                 # Check both User ID (column A) and Discord ID (column B)
                 if (len(row) > 0 and str(member_id) == str(row[0])) or \
                    (len(row) > 1 and str(member_id) == str(row[1])):
                     member_info = {
-                        "rank": row[2] if len(row) > 2 and row[2] else "Member",
-                        "role": row[3] if len(row) > 3 and row[3] else "Member"
+                        "rank": row[rank_col_idx] if rank_col_idx is not None and len(row) > rank_col_idx and row[rank_col_idx] else "Member",
+                        "banner": row[banner_col_idx] if banner_col_idx is not None and len(row) > banner_col_idx and row[banner_col_idx] else "Unassigned"
                     }
                     # Cache the result
                     self.set_cached_data(cache_key, member_info)
                     return member_info
-        
+
         # Default if not found
-        default_info = {"rank": "Member", "role": "Member"}
+        default_info = {"rank": "Member", "banner": "Unassigned"}
         self.set_cached_data(cache_key, default_info)
         return default_info
     
@@ -3800,7 +3851,10 @@ class StartQuest(commands.Cog):
             await interaction.followup.send("🔍 Checking for missing Guild IDs...")
             
             # Get all patrol data
-            worksheet = self.gc.open_by_url(self.sheets_url).worksheet('Patrols')
+            worksheet = await self.get_worksheet_cached('Patrols')
+            if not worksheet:
+                await interaction.followup.send("❌ Failed to access Google Sheets")
+                return
             all_values = await self.rate_limited_api_call(worksheet.get_all_values)
             
             if not all_values:
@@ -3990,6 +4044,8 @@ class PlaceholderCleanupConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="❌ Cleanup cancelled. No data was deleted.", view=None)
 
 class QuestPointsRecordingView(discord.ui.View):
+    PLAYERS_PER_PAGE = 10  # Number of players to show per page
+
     def __init__(self, patrol_id: str, quest_players: list, quest_cog):
         super().__init__(timeout=300)
         self.patrol_id = patrol_id
@@ -3998,6 +4054,7 @@ class QuestPointsRecordingView(discord.ui.View):
         self.original_interaction = None
         self.quest_name = None
         self.message = None  # Store the actual message object
+        self.current_page = 0  # Current page index for pagination
         
         # Create player selection dropdown with minimal, safe content
         options = []
@@ -4015,10 +4072,10 @@ class QuestPointsRecordingView(discord.ui.View):
             print(f"Error creating bulk option: {e}")
             return
         
-        # Add individual players with extremely conservative limits
-        # Reduce to absolute minimum to isolate the issue
-        max_players = min(5, len(quest_players))  # Start with just 5 players max
-        print(f"Creating minimal dropdown: {len(quest_players)} total players, limiting to {max_players}")
+        # Add individual players up to Discord's select limit:
+        # max 25 options total, reserving 1 slot for "Set Points for All".
+        max_players = min(24, len(quest_players))
+        print(f"Creating player dropdown: {len(quest_players)} total players, limiting to {max_players}")
         
         for i, player in enumerate(quest_players[:max_players]):
             try:
@@ -4101,8 +4158,8 @@ class QuestPointsRecordingView(discord.ui.View):
                     player_name = row[11] if len(row) > 11 else ""  # Column L: Player Name
                     
                     if player_id and player_name:  # Skip leader row or empty player data
-                        # Get rank and role from the correct columns (Patrols tab)
-                        player_role = row[12] if len(row) > 12 else ""  # Column M: Player Role
+                        # Get rank and banner from the correct columns (Patrols tab)
+                        player_banner = row[12] if len(row) > 12 else ""  # Column M: Player Banner
                         player_rank = row[13] if len(row) > 13 else ""  # Column N: Player Rank
                         join_time_str = row[21] if len(row) > 21 else ""  # Column V: Join Time
                         
@@ -4146,7 +4203,7 @@ class QuestPointsRecordingView(discord.ui.View):
                             'player_id': player_id,
                             'player_name': player_name,
                             'player_rank': player_rank,
-                            'player_role': player_role,
+                            'player_banner': player_banner,
                             'time_in_quest': time_in_quest,
                             'points_recorded': kill_stats_recorded,
                             'quest_points': quest_points,
@@ -4171,14 +4228,25 @@ class QuestPointsRecordingView(discord.ui.View):
                 color=0x0099ff
             )
             
-            # Add player information with updated status
+            # Add player information with updated status using pagination
             if updated_quest_players:
-                # Limit to 10 players for display to avoid embed limits
-                display_players = updated_quest_players[:10]
-                
+                total_players = len(updated_quest_players)
+                total_pages = (total_players + self.PLAYERS_PER_PAGE - 1) // self.PLAYERS_PER_PAGE
+
+                # Clamp current page to valid range
+                if self.current_page >= total_pages:
+                    self.current_page = max(0, total_pages - 1)
+
+                # Calculate slice for current page
+                start_idx = self.current_page * self.PLAYERS_PER_PAGE
+                end_idx = min(start_idx + self.PLAYERS_PER_PAGE, total_players)
+                display_players = updated_quest_players[start_idx:end_idx]
+
                 for i, player in enumerate(display_players):
+                    # Use global index for display numbering
+                    global_idx = start_idx + i
                     status_icon = "✅" if player['points_recorded'] else "⏳"
-                    
+
                     # Create points display
                     if player['points_recorded']:
                         # Show recorded points with compact formatting
@@ -4193,29 +4261,29 @@ class QuestPointsRecordingView(discord.ui.View):
                             points_display.append(f"🏛️ {player['crusade_points']}")
                         if player['griefer_kills'] and player['griefer_kills'] != "❓" and player['griefer_kills'].strip():
                             points_display.append(f"💀 {player['griefer_kills']}")
-                        
+
                         points_text = " | ".join(points_display) if points_display else "No points recorded"
-                        
+
                         embed.add_field(
-                            name=f"{i+1}. {player['player_name']} {status_icon}",
-                            value=f"**Rank:** {player['player_rank']} | **Role:** {player['player_role']}\n**Time:** {player['time_in_quest']}\n**Points:** {points_text}",
+                            name=f"{global_idx+1}. {player['player_name']} {status_icon}",
+                            value=f"**Rank:** {player['player_rank']} | **Banner:** {player['player_banner']}\n**Time:** {player['time_in_quest']}\n**Points:** {points_text}",
                             inline=True
                         )
                     else:
                         # Show awaiting status
                         embed.add_field(
-                            name=f"{i+1}. {player['player_name']} {status_icon}",
-                            value=f"**Rank:** {player['player_rank']} | **Role:** {player['player_role']}\n**Time:** {player['time_in_quest']}\n**Status:** Awaiting recording",
+                            name=f"{global_idx+1}. {player['player_name']} {status_icon}",
+                            value=f"**Rank:** {player['player_rank']} | **Banner:** {player['player_banner']}\n**Time:** {player['time_in_quest']}\n**Status:** Awaiting recording",
                             inline=True
                         )
-                
+
                 # Add spacing if odd number of players (for better layout)
                 if len(display_players) % 2 == 1:
                     embed.add_field(name="\u200b", value="\u200b", inline=True)
-                
-                # Add footer with additional info if there are more players
-                if len(updated_quest_players) > 10:
-                    embed.set_footer(text=f"Showing 10 of {len(updated_quest_players)} players. Use dropdown to select any player.")
+
+                # Add pagination info to footer
+                if total_pages > 1:
+                    embed.set_footer(text=f"Page {self.current_page + 1}/{total_pages} | {total_players} players total | Use ◀ ▶ to navigate | ✅ Recorded ⏳ Pending")
                 else:
                     embed.set_footer(text="✅ = Points recorded | ⏳ = Awaiting recording | 📜 Quest 🔫 Ground 🚀 Pilot 🏛️ Crusade 💀 Griefer")
             
@@ -4270,6 +4338,29 @@ class QuestPointsRecordingView(discord.ui.View):
             
         except Exception as e:
             print(f"Error refreshing quest points embed: {e}")
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=3)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to previous page of players"""
+        if self.current_page > 0:
+            self.current_page -= 1
+            await interaction.response.defer()
+            await self.refresh_embed()
+        else:
+            await interaction.response.send_message("Already on the first page.", ephemeral=True)
+
+    @discord.ui.button(label="▶ Next", style=discord.ButtonStyle.secondary, row=3)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to next page of players"""
+        total_players = len(self.quest_players)
+        total_pages = (total_players + self.PLAYERS_PER_PAGE - 1) // self.PLAYERS_PER_PAGE
+
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            await interaction.response.defer()
+            await self.refresh_embed()
+        else:
+            await interaction.response.send_message("Already on the last page.", ephemeral=True)
 
     @discord.ui.button(label="Complete Quest", style=discord.ButtonStyle.success, emoji="✅", row=4)
     async def complete_quest(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4399,7 +4490,7 @@ class QuestPointsRecordingView(discord.ui.View):
                         print(f"Failed to apply quest completed tag: {e}")
             
             # Create completion embed using the same format as Record Points but for completion
-            # Get quest details and all player data with proper rank/role system
+            # Get quest details and all player data with proper rank/banner system
             worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
             member_log_worksheet = await self.quest_cog.get_worksheet_cached("Member Log")
             
@@ -4416,14 +4507,14 @@ class QuestPointsRecordingView(discord.ui.View):
                 except Exception as e:
                     print(f"Error getting member log data: {e}")
             
-            # Get quest details and leader rank/role from database using correct columns
+            # Get quest details and leader rank/banner from database using correct columns
             quest_name = "Unknown Quest"
             quest_description = ""
             quest_image = ""
             quest_game = ""
             leader_name = ""
             leader_rank = ""
-            leader_role = ""
+            leader_banner = ""
             quest_start_time = None
             
             quest_emoji = "🎉"  # Default emoji
@@ -4450,18 +4541,25 @@ class QuestPointsRecordingView(discord.ui.View):
                         pass
                     break
             
-            # Get leader role from Member Log using leader ID
+            # Get leader banner from Member Log using leader ID
             if leader_id:
                 try:
                     member_log_worksheet = await self.quest_cog.get_worksheet_cached("Member Log")
                     if member_log_worksheet:
                         member_log_values = await self.quest_cog.rate_limited_api_call(member_log_worksheet.get_all_values)
+                        # Header-based lookup for Banner column
+                        headers = member_log_values[0] if member_log_values else []
+                        banner_col_idx = None
+                        for idx, header in enumerate(headers):
+                            if header.strip().lower() == "banner":
+                                banner_col_idx = idx
+                                break
                         for row in member_log_values[1:]:  # Skip header row
                             if len(row) > 0 and str(row[0]) == str(leader_id):  # Column A: Discord ID
-                                leader_role = row[3] if len(row) > 3 else ""  # Column D: Role
+                                leader_banner = row[banner_col_idx] if banner_col_idx is not None and len(row) > banner_col_idx else ""
                                 break
                 except Exception as e:
-                    print(f"Error getting leader role from Member Log: {e}")
+                    print(f"Error getting leader banner from Member Log: {e}")
             
             # Calculate quest duration
             duration_text = "Unknown"
@@ -4490,15 +4588,15 @@ class QuestPointsRecordingView(discord.ui.View):
                     player_name = row[11] if len(row) > 11 else ""
                     
                     if player_id and player_name:
-                        # Get rank and role from the correct columns
-                        player_role = row[12] if len(row) > 12 else ""  # Column M: Player Role
+                        # Get rank and banner from the correct columns
+                        player_banner = row[12] if len(row) > 12 else ""  # Column M: Player Banner
                         player_rank = row[13] if len(row) > 13 else ""  # Column N: Player Rank
                         
-                        # Use rank if available, otherwise use role, otherwise default to "Member"
+                        # Use rank if available, otherwise use banner, otherwise default to "Member"
                         if player_rank and player_rank.strip():
                             display_rank = player_rank
-                        elif player_role and player_role.strip():
-                            display_rank = player_role
+                        elif player_banner and player_banner.strip():
+                            display_rank = player_banner
                         else:
                             display_rank = "Member"
                         
@@ -4532,7 +4630,7 @@ class QuestPointsRecordingView(discord.ui.View):
                             'player_name': player_name,
                             'player_id': player_id,
                             'player_rank': player_rank,  # Use rank from Google Sheets column N
-                            'player_role': player_role,
+                            'player_banner': player_banner,
                             'time_in_quest': time_in_quest,
                             'quest_points': quest_points,
                             'ground_kills': ground_kills,
@@ -4541,14 +4639,14 @@ class QuestPointsRecordingView(discord.ui.View):
                             'griefer_kills': griefer_kills
                         })
             
-            # Format leader display with rank and role on separate lines
+            # Format leader display with rank and banner on separate lines
             leader_display = f"**Leader:** {leader_name}"
-            if leader_rank and leader_rank.strip() and leader_role and leader_role.strip():
-                leader_display += f"\n**Rank:** {leader_rank} | **Role:** {leader_role}"
+            if leader_rank and leader_rank.strip() and leader_banner and leader_banner.strip():
+                leader_display += f"\n**Rank:** {leader_rank} | **Banner:** {leader_banner}"
             elif leader_rank and leader_rank.strip():
                 leader_display += f"\n**Rank:** {leader_rank}"
-            elif leader_role and leader_role.strip():
-                leader_display += f"\n**Role:** {leader_role}"
+            elif leader_banner and leader_banner.strip():
+                leader_display += f"\n**Banner:** {leader_banner}"
             
             # Extract just the 4-digit quest number from patrol_id (e.g., P533127850409328670-1082 -> 1082)
             quest_number = self.patrol_id.split('-')[-1] if '-' in self.patrol_id else self.patrol_id
@@ -4587,7 +4685,7 @@ class QuestPointsRecordingView(discord.ui.View):
                 await self.update_forum_thread_tags_completed(thread_id)
             
             # Update Google Sheets with completion timestamp and send to admin review (run async to avoid interaction timeout)
-            asyncio.create_task(self.send_quest_for_admin_review(display_quest_name, leader_name, leader_rank, leader_role, completed_quest_players, quest_image))
+            asyncio.create_task(self.send_quest_for_admin_review(display_quest_name, leader_name, leader_rank, leader_banner, completed_quest_players, quest_image))
             
         except Exception as e:
             print(f"Error completing quest from points interface: {e}")
@@ -4603,21 +4701,21 @@ class QuestPointsRecordingView(discord.ui.View):
             except Exception as followup_error:
                 print(f"Failed to send error message: {followup_error}")
 
-    async def send_quest_for_admin_review(self, quest_name, leader_name, leader_rank, leader_role, completed_quest_players, quest_image):
+    async def send_quest_for_admin_review(self, quest_name, leader_name, leader_rank, leader_banner, completed_quest_players, quest_image):
         """Send completed quest data to admin review channel and update completion timestamp"""
         try:
             # Update Google Sheets with completion timestamp (Column AE)
             worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
             if worksheet:
                 all_values = await self.quest_cog.rate_limited_api_call(worksheet.get_all_values)
-                
+
                 for i, row in enumerate(all_values):
                     if len(row) > 0 and row[0] == self.patrol_id:
                         quest_row_index = i + 1  # +1 because sheet rows are 1-indexed
-                        
+
                         # Update column AE (Quest Completed) with timestamp
                         completion_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        
+
                         # Column AE is the 31st column (A=1, B=2, ..., AE=31)
                         await self.quest_cog.rate_limited_api_call(
                             worksheet.update,
@@ -4626,15 +4724,15 @@ class QuestPointsRecordingView(discord.ui.View):
                         )
                         print(f"✅ Updated Quest Completed timestamp for {self.patrol_id}")
                         break
-            
+
             # Send to review channels in ALL guilds
             for guild in self.quest_cog.bot.guilds:
                 guild_settings = self.quest_cog.get_guild_settings(guild.id)
                 review_channel_id = guild_settings.get("quest_review_channel")
-                
+
                 if review_channel_id:
                     review_channel = self.quest_cog.bot.get_channel(review_channel_id)
-                    
+
                     if review_channel:
                         # Get quest description from the first message in the thread
                         quest_description = "Quest completed - awaiting admin review"
@@ -4646,36 +4744,40 @@ class QuestPointsRecordingView(discord.ui.View):
                                     if message.embeds:
                                         first_message = message
                                         break
-                                
+
                                 if first_message and first_message.embeds:
                                     embed = first_message.embeds[0]
                                     if embed.description:
                                         quest_description = embed.description
                             except Exception as e:
                                 print(f"Could not retrieve quest description: {e}")
-                        
+
                         # Create comprehensive admin review embed
                         review_embed = discord.Embed(
                             title="🎯 Quest Results Review",
                             description=f"**{quest_name}**\n{quest_description}",
                             color=0x00ff00
                         )
-                        
+
                         # Add quest leader information
                         leader_info = f"**{leader_name}**"
-                        if leader_rank and leader_role:
-                            leader_info += f"\n{leader_rank} | {leader_role}"
+                        if leader_rank and leader_banner:
+                            leader_info += f"\n{leader_rank} | {leader_banner}"
                         elif leader_rank:
                             leader_info += f"\n{leader_rank}"
-                        elif leader_role:
-                            leader_info += f"\n{leader_role}"
+                        elif leader_banner:
+                            leader_info += f"\n{leader_banner}"
                         
                         review_embed.add_field(name="🎖️ Quest Leader", value=leader_info, inline=True)
                         
-                        # Add detailed participant roster (limited to fit in embed)
+                        # Add detailed participant roster with embed limit handling
+                        # Discord limits: 1024 chars per field value, 25 fields max, 6000 chars total
+                        MAX_FIELD_CHARS = 1000  # Leave buffer for safety
+                        MAX_ROSTER_FIELDS = 20  # Reserve 5 fields for leader, summary, footer, etc.
+
                         if completed_quest_players:
-                            participant_roster = ""
-                            for i, player in enumerate(completed_quest_players[:20]):  # Limit to 20 for embed size
+                            roster_lines = []
+                            for i, player in enumerate(completed_quest_players):
                                 points_summary = []
                                 if player['quest_points'] and player['quest_points'] != "❓":
                                     points_summary.append(f"📜{player['quest_points']}")
@@ -4687,43 +4789,76 @@ class QuestPointsRecordingView(discord.ui.View):
                                     points_summary.append(f"🏛️{player['crusade_points']}")
                                 if player['griefer_kills'] and player['griefer_kills'] != "❓":
                                     points_summary.append(f"💀{player['griefer_kills']}")
-                                
+
                                 points_text = " ".join(points_summary) if points_summary else "No scoring"
-                                
-                                # Add rank and role info
-                                rank_role_info = ""
-                                if player.get('player_rank') and player['player_rank'] != "❓":
-                                    rank_role_info += f"**Rank:** {player['player_rank']}"
-                                if player.get('player_role') and player['player_role'] != "❓" and player['player_role'] != "":
-                                    if rank_role_info:
-                                        rank_role_info += f" | **Role:** {player['player_role']}"
-                                    else:
-                                        rank_role_info += f"**Role:** {player['player_role']}"
-                                
-                                if rank_role_info:
-                                    participant_roster += f"`{i+1:2}.` <@{player['player_id']}> - {rank_role_info}\n    ⏱️ {player['time_in_quest']} | {points_text}\n"
+
+                                # Compact format to fit more players
+                                line = f"`{i+1:2}.` <@{player['player_id']}> ⏱️{player['time_in_quest']} | {points_text}"
+                                roster_lines.append(line)
+
+                            # Chunk roster lines into fields that fit within limits
+                            roster_fields = []
+                            current_chunk = ""
+                            for line in roster_lines:
+                                test_chunk = current_chunk + line + "\n" if current_chunk else line + "\n"
+                                if len(test_chunk) > MAX_FIELD_CHARS:
+                                    # Save current chunk and start new one
+                                    if current_chunk:
+                                        roster_fields.append(current_chunk.rstrip())
+                                    current_chunk = line + "\n"
+                                    # Stop if we've hit max fields
+                                    if len(roster_fields) >= MAX_ROSTER_FIELDS:
+                                        remaining = len(roster_lines) - roster_lines.index(line)
+                                        current_chunk = f"*... and {remaining} more participants*"
+                                        break
                                 else:
-                                    participant_roster += f"`{i+1:2}.` <@{player['player_id']}> ({player['time_in_quest']}) - {points_text}\n"
-                            
-                            if len(completed_quest_players) > 20:
-                                participant_roster += f"*... and {len(completed_quest_players) - 20} more participants*"
-                            
-                            review_embed.add_field(name="👥 Participant Roster", value=participant_roster, inline=False)
-                        
+                                    current_chunk = test_chunk
+
+                            # Add final chunk
+                            if current_chunk and len(roster_fields) < MAX_ROSTER_FIELDS:
+                                roster_fields.append(current_chunk.rstrip())
+
+                            # Add roster fields to embed
+                            for idx, field_text in enumerate(roster_fields):
+                                field_name = "👥 Participant Roster" if idx == 0 else f"👥 Roster (cont. {idx + 1})"
+                                review_embed.add_field(name=field_name, value=field_text, inline=False)
+
                         # Add quest image if available
                         if quest_image and quest_image.startswith(('http://', 'https://')):
                             review_embed.set_thumbnail(url=quest_image)
-                        
+
                         # Add footer
                         quest_number = self.patrol_id.split('-')[-1] if '-' in self.patrol_id else self.patrol_id
-                        review_embed.set_footer(text=f"Quest ID: {quest_number} | Review and approve quest results below")
-                        
+                        review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(completed_quest_players)} participants | Review below")
+
                         # Create review view with approve/edit buttons
                         review_view = QuestReviewView(self.patrol_id, quest_name, self.quest_cog)
-                        
-                        # Send to admin review channel
-                        await review_channel.send(embed=review_embed, view=review_view)
-                        print(f"✅ Sent quest {self.patrol_id} to guild {guild.name} review channel")
+
+                        # Send to admin review channel with fallback handling
+                        try:
+                            await review_channel.send(embed=review_embed, view=review_view)
+                            print(f"✅ Sent quest {self.patrol_id} to guild {guild.name} review channel")
+                        except discord.HTTPException as http_err:
+                            # Fallback: Send minimal summary embed if full embed fails
+                            print(f"⚠️ HTTPException sending review embed for {self.patrol_id}: {http_err}. Falling back to summary embed.")
+
+                            fallback_embed = discord.Embed(
+                                title="🎯 Quest Results Review",
+                                description=f"**{quest_name}**\n\n*Full roster too large - see thread for details*",
+                                color=0xFFA500  # Orange to indicate fallback
+                            )
+                            fallback_embed.add_field(name="🎖️ Quest Leader", value=f"**{leader_name}**", inline=True)
+                            fallback_embed.add_field(name="👥 Participants", value=f"{len(completed_quest_players)} players", inline=True)
+                            fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review and approve below")
+
+                            if quest_image and quest_image.startswith(('http://', 'https://')):
+                                fallback_embed.set_thumbnail(url=quest_image)
+
+                            try:
+                                await review_channel.send(embed=fallback_embed, view=review_view)
+                                print(f"✅ Sent FALLBACK embed for quest {self.patrol_id} to guild {guild.name}")
+                            except discord.HTTPException as fallback_err:
+                                print(f"❌ CRITICAL: Even fallback embed failed for {self.patrol_id}: {fallback_err}")
                     else:
                         print(f"⚠️ Quest review channel not found for guild {guild.name}")
                 else:
@@ -4892,10 +5027,6 @@ class QuestPointsModal(discord.ui.Modal):
             
             self.add_item(self.ground_kills)
             self.add_item(self.pilot_kills)
-            self.add_item(self.griefer_kills)
-            self.add_item(self.ground_kills)
-            self.add_item(self.pilot_kills)
-            self.add_item(self.crusade_points)
             self.add_item(self.griefer_kills)
 
     def get_current_value(self, player_data, key_names):
