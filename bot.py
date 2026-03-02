@@ -72,6 +72,14 @@ async def on_ready():
         else:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} command(s) globally")
+
+            # Clean up stale guild-scoped commands so Discord does not show duplicates
+            # when a guild previously used staging/test syncs.
+            if TEST_GUILD_ID:
+                guild = discord.Object(id=int(TEST_GUILD_ID))
+                bot.tree.clear_commands(guild=guild)
+                cleared = await bot.tree.sync(guild=guild)
+                print(f"Cleared stale guild commands for TEST guild {TEST_GUILD_ID}; remaining guild commands: {len(cleared)}")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
