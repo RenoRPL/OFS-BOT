@@ -3715,7 +3715,6 @@ class StartQuest(commands.Cog):
 
     @app_commands.command(name="start_quest", description="Start a new quest")
     @app_commands.describe(
-        game="Select the game for this quest",
         quest_type="Select whether this is a Quest or Crusade",
         leader="Who will be the quest leader? (Admin/Special Role only)"
     )
@@ -3724,13 +3723,13 @@ class StartQuest(commands.Cog):
         app_commands.Choice(name="🏛️ Crusade", value="Crusade")
     ])
     async def start_quest(
-        self, 
+        self,
         interaction: discord.Interaction,
-        game: str,
         quest_type: str,
         leader: Optional[discord.Member] = None
     ):
         """Start a new quest with specified leader and game"""
+        game = "Star Citizen"
         await interaction.response.defer(ephemeral=True)
         
         # Check quest system permissions
@@ -3777,8 +3776,6 @@ class StartQuest(commands.Cog):
         
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-    # Add autocomplete to the start_quest command
-    start_quest.autocomplete('game')(game_autocomplete)
 
     @app_commands.command(name="set_quest_system", description="Configure quest system channels and settings")
     @app_commands.describe(

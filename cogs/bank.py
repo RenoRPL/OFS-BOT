@@ -2027,6 +2027,8 @@ class BankCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         timer_minutes, ledger_lines, image_mode = await self.fetch_permissions_cached("/bank")
 
         view = BankView(
@@ -2044,7 +2046,7 @@ class BankCog(commands.Cog):
             print(f"[BankCog] bank_command embed build failed: {e}")
             embed = view.build_error_embed(f"Failed to load bank: {type(e).__name__}")
 
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
         try:
             view.message = await interaction.original_response()
