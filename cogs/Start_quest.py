@@ -294,8 +294,14 @@ class QuestMakerView(discord.ui.View):
             return None
         
         forum_channel = guild.get_channel(forum_channel_id)
-        if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
-            print("❌ Forum channel not found or not a forum channel")
+        if not forum_channel:
+            try:
+                forum_channel = await guild.fetch_channel(forum_channel_id)
+            except Exception as e:
+                print(f"❌ Forum channel fetch failed: {e}")
+                return None
+        if not isinstance(forum_channel, discord.ForumChannel):
+            print(f"❌ Channel {forum_channel_id} is not a forum channel (got {type(forum_channel).__name__})")
             return None
         
         # Find the game tag, Quest Started tag, and Crusade tag
