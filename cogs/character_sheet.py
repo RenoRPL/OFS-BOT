@@ -369,7 +369,13 @@ def _find_header_index_any(headers: list[str], candidates: list[str]) -> int:
 
 
 # v3.3: prettify stat label
+_STAT_LABEL_OVERRIDES: Dict[str, str] = {
+    "PatrolCount": "Quest/Crusades Completed",
+}
+
 def _pretty_stat_name(name: str) -> str:
+    if name in _STAT_LABEL_OVERRIDES:
+        return _STAT_LABEL_OVERRIDES[name]
     # Display-only: replace underscores, then Patrol/Patrols -> Quest/Quests
     label = str(name or "").replace("_", " ").strip()
     label = re.sub(r"\bPatrols\b", "Quests", label, flags=re.IGNORECASE)
