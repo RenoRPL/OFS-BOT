@@ -1126,7 +1126,7 @@ class CharacterSheet(commands.Cog):
             color=discord.Color.blue(),
         )
 
-        profile_url = f"https://orderofthefallenstar.com/profile?playerId={target.id}"
+        profile_url = f"https://orderofthefallenstar.com/ofs_playersheet?player={target.id}"
         user_field_value = f"{target.mention}\n[View full profile]({profile_url})"
         embed1.add_field(name="User", value=user_field_value, inline=True)
         embed1.add_field(name="Reputation Level", value=f"Lvl {level_info['level']}", inline=True)
