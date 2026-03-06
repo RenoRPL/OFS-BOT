@@ -177,7 +177,7 @@ class QuestMakerView(discord.ui.View):
             
             # Post to forum channel
             forum_post = await self.post_to_forum(interaction.guild, patrol_id)
-            print(f"Debug: Forum post result: {forum_post}")
+            print(f"Debug: Forum post result: {forum_post}", flush=True)
             
             if forum_post:
                 # Update the sheet with forum thread info
@@ -286,22 +286,27 @@ class QuestMakerView(discord.ui.View):
     
     async def post_to_forum(self, guild: discord.Guild, patrol_id: str):
         """Post the quest to the forum channel"""
+        import traceback
         # Get forum channel from guild-specific settings
         guild_settings = self.quest_cog.get_guild_settings(guild.id)
         forum_channel_id = guild_settings.get("quest_forum_channel")
+        print(f"[post_to_forum] guild={guild.id} forum_channel_id={forum_channel_id}", flush=True)
         if not forum_channel_id:
-            print("❌ Forum channel not configured")
+            print("❌ Forum channel not configured", flush=True)
             return None
-        
+
         forum_channel = guild.get_channel(forum_channel_id)
+        print(f"[post_to_forum] get_channel result: {forum_channel}", flush=True)
         if not forum_channel:
             try:
                 forum_channel = await guild.fetch_channel(forum_channel_id)
+                print(f"[post_to_forum] fetch_channel result: {forum_channel}", flush=True)
             except Exception as e:
-                print(f"❌ Forum channel fetch failed: {e}")
+                print(f"❌ Forum channel fetch failed: {e}", flush=True)
+                traceback.print_exc()
                 return None
         if not isinstance(forum_channel, discord.ForumChannel):
-            print(f"❌ Channel {forum_channel_id} is not a forum channel (got {type(forum_channel).__name__})")
+            print(f"❌ Channel {forum_channel_id} is not a forum channel (got {type(forum_channel).__name__})", flush=True)
             return None
         
         # Find the game tag, Quest Started tag, and Crusade tag
@@ -413,7 +418,8 @@ class QuestMakerView(discord.ui.View):
             return thread.thread
             
         except Exception as e:
-            print(f"❌ Failed to post to forum: {e}")
+            print(f"❌ Failed to post to forum: {e}", flush=True)
+            traceback.print_exc()
             return None
     
     async def update_sheet_with_forum_info(self, patrol_id: str, thread: discord.Thread):
