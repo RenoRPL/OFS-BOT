@@ -2416,6 +2416,118 @@ class ActiveQuestManageView(discord.ui.View):
             else:
                 await interaction.response.send_message(error_msg, ephemeral=True)
 
+    async def update_forum_thread_with_completed_tag(self, interaction: discord.Interaction):
+        try:
+            if isinstance(interaction.channel, discord.Thread) and isinstance(interaction.channel.parent, discord.ForumChannel):
+                forum_channel = interaction.channel.parent
+                thread = interaction.channel
+
+                completed_tag = None
+                quest_started_tag = None
+                for tag in forum_channel.available_tags:
+                    if tag.name == "Quest Completed":
+                        completed_tag = tag
+                    elif tag.name == "Quest Started":
+                        quest_started_tag = tag
+
+                if completed_tag:
+                    current_tags = list(thread.applied_tags)
+                    if quest_started_tag and quest_started_tag in current_tags:
+                        current_tags.remove(quest_started_tag)
+                    if completed_tag not in current_tags:
+                        current_tags.append(completed_tag)
+                    await thread.edit(applied_tags=current_tags)
+                    print(f"✅ Applied 'Quest Completed' tag to thread {thread.id}")
+                else:
+                    print("⚠️ 'Quest Completed' tag not found in forum channel")
+        except Exception as e:
+            print(f"Error updating forum thread tags: {e}")
+
+    async def send_quest_for_admin_review(self, quest_name, leader_name, leader_rank, leader_banner, completed_quest_players, quest_image):
+        """Send completed quest data to admin review channel and update completion timestamp"""
+        try:
+            worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
+            if worksheet:
+                all_values = await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
+                for i, row in enumerate(all_values):
+                    if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
+                        quest_row_index = i + 1
+                        completion_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        await self.join_quest_view.quest_cog.rate_limited_api_call(
+                            worksheet.update,
+                            f"AE{quest_row_index}",
+                            [[completion_timestamp]]
+                        )
+                        print(f"✅ Updated Quest Completed timestamp for {self.join_quest_view.patrol_id}")
+                        break
+
+            for guild in self.join_quest_view.quest_cog.bot.guilds:
+                guild_settings = self.join_quest_view.quest_cog.get_guild_settings(guild.id)
+                review_channel_id = guild_settings.get("quest_review_channel")
+                if not review_channel_id:
+                    continue
+                review_channel = self.join_quest_view.quest_cog.bot.get_channel(review_channel_id)
+                if not review_channel:
+                    continue
+
+                quest_number = self.join_quest_view.patrol_id.split('-')[-1] if '-' in self.join_quest_view.patrol_id else self.join_quest_view.patrol_id
+
+                review_embed = discord.Embed(
+                    title="🎯 Quest Results Review",
+                    description=f"**{quest_name}**",
+                    color=0x00ff00
+                )
+                leader_info = f"**{leader_name}**"
+                if leader_rank and leader_banner:
+                    leader_info += f"\n{leader_rank} | {leader_banner}"
+                elif leader_rank:
+                    leader_info += f"\n{leader_rank}"
+                elif leader_banner:
+                    leader_info += f"\n{leader_banner}"
+                review_embed.add_field(name="🎖️ Quest Leader", value=leader_info, inline=True)
+
+                if completed_quest_players:
+                    roster_lines = []
+                    for i, player in enumerate(completed_quest_players):
+                        pts = []
+                        if player['quest_points'] and player['quest_points'] != "❓": pts.append(f"📜{player['quest_points']}")
+                        if player['ground_kills'] and player['ground_kills'] != "❓": pts.append(f"🔫{player['ground_kills']}")
+                        if player['pilot_kills'] and player['pilot_kills'] != "❓": pts.append(f"🚀{player['pilot_kills']}")
+                        if player['crusade_points'] and player['crusade_points'] != "❓": pts.append(f"🏛️{player['crusade_points']}")
+                        if player['griefer_kills'] and player['griefer_kills'] != "❓": pts.append(f"💀{player['griefer_kills']}")
+                        roster_lines.append(f"`{i+1:2}.` <@{player['player_id']}> ⏱️{player['time_in_quest']} | {' '.join(pts) or 'No scoring'}")
+
+                    chunks, current = [], ""
+                    for line in roster_lines:
+                        test = current + line + "\n" if current else line + "\n"
+                        if len(test) > 1000:
+                            chunks.append(current.rstrip())
+                            current = line + "\n"
+                        else:
+                            current = test
+                    if current:
+                        chunks.append(current.rstrip())
+
+                    for idx, chunk in enumerate(chunks):
+                        name = "👥 Participant Roster" if idx == 0 else f"👥 Roster (cont. {idx+1})"
+                        review_embed.add_field(name=name, value=chunk, inline=False)
+                else:
+                    review_embed.add_field(name="👥 Participant Roster", value="No participants found", inline=False)
+
+                if quest_image and quest_image.startswith(('http://', 'https://')):
+                    review_embed.set_thumbnail(url=quest_image)
+                review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(completed_quest_players)} participants | Review below")
+
+                review_view = QuestReviewView(self.join_quest_view.patrol_id, quest_name, self.join_quest_view.quest_cog)
+                try:
+                    await review_channel.send(embed=review_embed, view=review_view)
+                    print(f"✅ Sent quest {self.join_quest_view.patrol_id} to guild {guild.name} review channel")
+                except discord.HTTPException as e:
+                    print(f"❌ Failed to send review embed for {self.join_quest_view.patrol_id}: {e}")
+
+        except Exception as e:
+            print(f"Error sending quest for admin review: {e}")
+
 class ParticipantManagementView(discord.ui.View):
     def __init__(self, quest_manage_view: "ActiveQuestManageView", participant_data: list):
         super().__init__(timeout=60)
