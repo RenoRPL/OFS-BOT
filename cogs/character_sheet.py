@@ -29,7 +29,8 @@ BANNERS_SHEET = "Banners"
 PERMISSIONS_SHEET = "Permissions for slash commands"
 REPUTATION_SHEET = "Reputation"  # v2.3: Reputation tab for level icons
 BANK_SHEET = "Bank"  # v3.2: Bank tab for wallet balances
-PATROLS_TOTALS_SHEET = "Patrols_User_Totals"  # v3.3: page 2 stats
+PATROLS_TOTALS_SHEET = "Patrols_User_Totals"        # v3.3: page 2 stats baseline
+PATROLS_ADJUSTMENTS_SHEET = "Patrols_User_Adjustments"  # v3.3: per-user deltas applied on top
 
 USER_ID_HEADER = "User ID"
 BANNER_HEADER = "Banner"
@@ -587,53 +588,67 @@ class CharacterSheet(commands.Cog):
 
         return (0, 0, 0)
 
-    # v3.3: Patrol totals read
+    # v3.3: Patrol totals read (baseline + adjustments merged)
     def _get_patrol_totals_for_user(self, user_id: str) -> Dict[str, int]:
         """
-        Reads Patrols_User_Totals and returns dict of configured stat columns for the user.
-        Missing columns or missing user row -> 0s.
+        Returns authoritative stat totals by merging Patrols_User_Totals (baseline)
+        with all matching rows in Patrols_User_Adjustments (deltas).
+        Never read baseline alone — adjustments are always applied on top.
         """
         out: Dict[str, int] = {k: 0 for k in PATROLS_STATS_COLUMNS}
-
-        ws = self._worksheet(PATROLS_TOTALS_SHEET)
-        if not ws:
-            return out
-
-        try:
-            data = _get_all_values_cached(ws, PATROLS_TOTALS_SHEET)
-        except Exception:
-            return out
-
-        if not data or len(data) < 2:
-            return out
-
-        headers = data[0]
-        # Find user id column
-        uid_idx = self._find_header_index(headers, USER_ID_HEADER)
-        if uid_idx == -1:
-            uid_idx = self._find_header_index(headers, "Discord ID")
-        if uid_idx == -1:
-            uid_idx = 0  # fallback
-
-        # Map stat col indexes
-        col_map: Dict[str, int] = {}
-        for stat in PATROLS_STATS_COLUMNS:
-            idx = self._find_header_index(headers, stat)
-            if idx != -1:
-                col_map[stat] = idx
-
         target = str(user_id).strip()
-        for row in data[1:]:
-            uid = (row[uid_idx] if uid_idx < len(row) else "").strip()
-            if uid != target:
-                continue
-            for stat in PATROLS_STATS_COLUMNS:
-                idx = col_map.get(stat, -1)
-                if idx != -1 and idx < len(row):
-                    out[stat] = _to_int(row[idx])
-                else:
-                    out[stat] = 0
-            return out
+
+        # --- Baseline (Patrols_User_Totals) ---
+        ws_totals = self._worksheet(PATROLS_TOTALS_SHEET)
+        if ws_totals:
+            try:
+                data = _get_all_values_cached(ws_totals, PATROLS_TOTALS_SHEET)
+                if data and len(data) >= 2:
+                    headers = data[0]
+                    uid_idx = self._find_header_index(headers, USER_ID_HEADER)
+                    if uid_idx == -1:
+                        uid_idx = self._find_header_index(headers, "Discord ID")
+                    if uid_idx == -1:
+                        uid_idx = 0
+                    col_map: Dict[str, int] = {
+                        stat: self._find_header_index(headers, stat)
+                        for stat in PATROLS_STATS_COLUMNS
+                    }
+                    for row in data[1:]:
+                        uid = (row[uid_idx] if uid_idx < len(row) else "").strip()
+                        if uid == target:
+                            for stat in PATROLS_STATS_COLUMNS:
+                                idx = col_map.get(stat, -1)
+                                if idx != -1 and idx < len(row):
+                                    out[stat] = _to_int(row[idx])
+                            break
+            except Exception:
+                pass
+
+        # --- Adjustments (Patrols_User_Adjustments) ---
+        ws_adj = self._worksheet(PATROLS_ADJUSTMENTS_SHEET)
+        if ws_adj:
+            try:
+                data = _get_all_values_cached(ws_adj, PATROLS_ADJUSTMENTS_SHEET)
+                if data and len(data) >= 2:
+                    headers = data[0]
+                    uid_idx = self._find_header_index(headers, USER_ID_HEADER)
+                    if uid_idx == -1:
+                        uid_idx = 0
+                    col_map = {
+                        stat: self._find_header_index(headers, stat)
+                        for stat in PATROLS_STATS_COLUMNS
+                    }
+                    for row in data[1:]:
+                        uid = (row[uid_idx] if uid_idx < len(row) else "").strip()
+                        if uid != target:
+                            continue
+                        for stat in PATROLS_STATS_COLUMNS:
+                            idx = col_map.get(stat, -1)
+                            if idx != -1 and idx < len(row):
+                                out[stat] += _to_int(row[idx])
+            except Exception:
+                pass
 
         return out
 
