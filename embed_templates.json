@@ -28,5 +28,75 @@
         }
       ]
     }
+  },
+  "1385700546434039928": {
+    "Articles I-IX": {
+      "mention_text": "",
+      "title": "Codex of the Fallen Star",
+      "message": "### Article I. Loyalty to the Order Above All\n\nThe Order stands above self, coin, and clan. All personal alliances, factions, and pursuits are secondary to the will and interests of the Order. Betrayal of the Order is the gravest offense and is judged by the Council or the Emperors.\n\n### Article II. Authority, Command, and the Chain of Obedience\n\nAuthority flows downward through the chain of command. Responsibility and accountability flow upward. The Council interprets the will of the Emperors and resolves disputes of authority. Bypassing the chain of command without just cause invites censure.\n\n### Article III. The Duty of Mentorship and Training\n\nEach Knight may take up to two Pages under their guidance and prepare them for service as Squires and eventual Knighthood. Those entrusted with mentorship are expected to lead, train, and uphold standards. Failure to fulfill these duties may result in reassignment or the loss of mentorship privileges.\n\n### Article IV. The Keeping of Records and Deeds\n\nAll sanctioned operations, whether conducted as Quests or Crusades as defined in Appendix I, must be recorded in full, including participants, objectives, outcomes, spoils, and individual contributions. Records exist to ensure fairness, accountability, and the proper recognition of service. Knowingly falsifying records is a severe offense and is investigated by Chancellors and judged by the Council.\n\n### Article V. Conduct, Discipline, and Honor\n\nMembers of the Order are expected to act with discipline, restraint, and respect for the Codex. Unjust harm toward non-combatants, allies, or neutral parties is forbidden unless explicitly sanctioned. Disputes within the Order are to be addressed through proper channels and not aired publicly.\n\n### Article VI. Relics, Seals, and Property of the Order\n\nAll relics, banners, seals, and artifacts are the property of the Order. No such item may be claimed, sold, removed, or defiled without formal decree. Violations of this article are judged before the Council.\n\n### Article VII. Judgment, Trials, and Enforcement of the Codex\n\nChancellors serve as investigators and enforcers of the Codex, gathering evidence and carrying out judgments. The Council rules on major violations and matters of high consequence. The Emperors hold final authority and may issue binding decrees.\n\nMinor violations may be resolved by presiding officers. Intermediate breaches are reviewed by a Justicar and escalated when required. High crimes such as treason, falsification of records, or relic theft are judged by the Council, subject to Emperor authority.\n\n### Article VIII. Spoils, Tithes, and Contribution\n\nAll spoils gained through sanctioned operations must be recorded in the appropriate quest or crusade record. Distribution of spoils and rewards is determined by documented contribution and service to the Order.\n\nThe Order recognizes an internal currency of copper, silver, and gold as a measure of service, time, and contribution. This currency is issued, recorded, and regulated by the Order and may be used for compensation, allocation of spoils, and other sanctioned purposes.\n\nCurrency issuance, reward allocation, and contribution recognition may vary between Quests and Crusades in accordance with their scale and purpose, as defined in Appendix I.\n\nA tithe of ten percent is claimed by the Order prior to distribution to fund logistics, relic upkeep, and crusades. Misrepresentation, concealment, or manipulation of spoils or currency is considered a serious violation of the Codex.\n\n### Article IX. Secrecy, Knowledge, and Classified Matters\n\nOperational plans, relic locations, and Council decrees are considered restricted unless formally authorized. The careless or deliberate disclosure of protected information is a major violation and is reviewed by the Council.",
+      "image_url": "",
+      "btn_label": "",
+      "btn_url": "",
+      "footer_text": "",
+      "footer_icon_url": "",
+      "thumbnail_url": "",
+      "author_name": "",
+      "author_icon_url": "",
+      "author_url": "",
+      "color_hex": "",
+      "add_timestamp": false,
+      "fields": []
+    },
+    "Quests Crusades": {
+      "mention_text": "",
+      "title": "",
+      "message": "### Article X. Emergency Authority in Times of Crisis\n\nDuring moments of grave threat, Knights and those above them may act beyond normal permissions to preserve life, relics, or operational integrity. This authority may apply to both Quests and Crusades when circumstances demand immediate action. All such actions must be recorded and are subject to review once the crisis has passed.\n\n### Article XI. Advancement, Merit, and Worthiness\n\nAdvancement within the Order is earned through documented contribution, demonstrated merit, and proven capability. Trials of skill, leadership, doctrine, or service may be required. Advancement granted without merit is corruption and is punishable by demotion.\n\n### Article XII. Authority of the Codex and the Enduring Star\n\nThis Codex reflects the will of the Fallen Star and governs all who serve beneath its light. The Primarchs' decree stands above all other law. Amendments to the Codex require the approval of the Primarch or the unanimous consent of the Council of Ascension.\n\n### Appendix I. Quests and Crusades\n\nThe Order recognizes two sanctioned forms of organized action: Quests and Crusades. Both serve the Order and are governed by the Codex, but they differ in scale, intent, and authority.\n\n### Quests\n\nA Quest is an operational action undertaken in response to immediate needs, opportunities, or circumstances.\n\n\u2022 Quests are typically impromptu or lightly planned.\n\u2022 Quests typically involve a small to moderate number of members.\n\u2022 Objectives are practical, short-term, or exploratory in nature.\n\u2022Quests may be initiated by Knights or higher authority when circumstances require action. \u2022 The sole exception is a Squire acting under the direct supervision of a Knight.\n\u2022 Outcomes, spoils, and contributions must be recorded in the quest record.\n\u2022 Quests form the foundation of day-to-day service within the Order.\n\n### Crusades\n\nA Crusade is a large-scale, deliberate operation undertaken in pursuit of a major objective aligned with the long-term interests of the Order.\n\n\u2022 Crusades are planned in advance and formally sanctioned.\n\u2022 Crusades involve a broad assembly of members, often across multiple ranks, Paths, or Chapters.\n\u2022 Objectives are strategic, ceremonial, territorial, or pivotal to the Order\u2019s direction.\n\u2022 Crusades are typically initiated or approved by senior leadership.\n\u2022 Participation, time committed, and outcomes are formally recorded and reviewed.\n\u2022 Crusades represent moments of collective effort and unified purpose.\n\n### Distinction and Application\n\n\u2022 Quests address immediate needs and routine operations.\n\u2022 Crusades advance the long-term vision and strategic objectives of the Order.\n\nBoth Quests and Crusades are subject to the authority, recordkeeping requirements, currency systems, and disciplinary standards established by the Codex of the Fallen Star.",
+      "image_url": "",
+      "btn_label": "",
+      "btn_url": "",
+      "footer_text": "",
+      "footer_icon_url": "",
+      "thumbnail_url": "",
+      "author_name": "",
+      "author_icon_url": "",
+      "author_url": "",
+      "color_hex": "",
+      "add_timestamp": false,
+      "fields": []
+    },
+    "Time in Service and Merit Consid": {
+      "mention_text": "",
+      "title": "",
+      "message": "### Time in Service and Merit Consideration\n\nMinimum time-in-service requirements listed for each rank represent the standard progression path within the Order.\n\nDemonstrated merit through active participation may offset time-based requirements. Merit is measured through documented Quests and Crusades, reputation earned within the community, and sustained contribution to the Order.\n\nWhen a member\u2019s reputation, service record, and leadership conduct clearly exceed the expectations of their current rank, advancement may be considered prior to the minimum time requirement.\n\nAll time waivers:\n\u2022 Require review by the Council for the rank in question\n\u2022 Must be supported by documented quest and crusade records\n\u2022 May not bypass eligibility, authority, or oath requirements\n\n** Time-in-service may not be waived for disciplinary reasons or in cases of incomplete Codex understanding.**",
+      "image_url": "",
+      "btn_label": "",
+      "btn_url": "",
+      "footer_text": "",
+      "footer_icon_url": "",
+      "thumbnail_url": "",
+      "author_name": "",
+      "author_icon_url": "",
+      "author_url": "",
+      "color_hex": "",
+      "add_timestamp": false,
+      "fields": []
+    },
+    "The Treasury of the Order": {
+      "mention_text": "",
+      "title": "The Treasury of the Order",
+      "message": "The Treasury of the Order exists to ensure that those who serve are properly rewarded for their time, loyalty, and contribution to the quest. Members may claim their earned payment through the bank system once their pay has been granted.\n\nTo access the Treasury, members must type the following command in any text channel:\n\n**/bank**\n\nOnce the bank menu appears, select **View Pay**, then choose **Collect Pay** to receive any available payment.\n\nMembers may also access the shop to purchase available items. To open the shop, members must type the following command in any text channel:\n\n**/shop**\n\nOnce the shop menu appears, members may review the available items and complete any purchases they are eligible to make.\n\nAll members are expected to claim only what has been rightfully earned and purchase only through the proper channels. The Treasury stands as a record of service, trust, and contribution within the Order. Those who labor in the name of the Fallen Star shall be compensated, and those who abuse the Treasury shall answer before the Council.",
+      "image_url": "",
+      "btn_label": "",
+      "btn_url": "",
+      "footer_text": "",
+      "footer_icon_url": "",
+      "thumbnail_url": "",
+      "author_name": "",
+      "author_icon_url": "",
+      "author_url": "",
+      "color_hex": "",
+      "add_timestamp": false,
+      "fields": []
+    }
   }
 }
