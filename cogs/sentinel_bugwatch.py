@@ -111,6 +111,7 @@ HEADER_ALIASES: Dict[str, List[str]] = {
     "reporter_id": ["Reporter Discord ID", "Reporter ID", "Discord ID", "User ID"],
     "public_channel_id": ["Public Channel ID", "Source Channel ID"],
     "public_message_id": ["Public Message ID", "Source Message ID"],
+    "public_ack_message_id": ["Public Ack Message ID", "Public Status Message ID", "Public Reply Message ID", "User Facing Message ID"],
     "public_message_link": ["Public Message Link", "Message Link", "Source Link"],
     "admin_channel_id": ["Admin Channel ID"],
     "admin_message_id": ["Admin Message ID", "Ticket Message ID"],
@@ -823,19 +824,33 @@ class SentinelBugwatch(commands.Cog):
 
         try:
             channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
-            if not isinstance(channel, discord.TextChannel):
+            if not hasattr(channel, "fetch_message") or not hasattr(channel, "history"):
+                print(f"[Sentinel] Public channel for {ticket_id} does not support message updates: {type(channel).__name__}")
                 return
+
+            # Best path for new tickets: fetch the exact Sentinel acknowledgement message if the Sheet has a column for it.
+            ack_id = _get_row_value(row, hmap.get("public_ack_message_id"))
+            if ack_id.isdigit():
+                try:
+                    ack_msg = await channel.fetch_message(int(ack_id))
+                    if ack_msg.embeds:
+                        await ack_msg.edit(embed=embed)
+                        return
+                except Exception as e:
+                    print(f"[Sentinel] Public ack fetch failed for {ticket_id} ({ack_id}); falling back to search: {e}")
+
             original_msg = await channel.fetch_message(int(message_id))
-            async for msg in channel.history(limit=35, after=original_msg):
-                if not msg.author.bot or not msg.embeds:
+            async for msg in channel.history(limit=100, after=original_msg, oldest_first=True):
+                if not getattr(msg.author, "bot", False) or not msg.embeds:
                     continue
                 candidate = msg.embeds[0]
                 if not (candidate.title or "").startswith(f"✅ Report Submitted to {SENTINEL_NAME}"):
                     continue
                 for field in candidate.fields:
-                    if field.name == "Ticket" and field.value == ticket_id:
+                    if field.name == "Ticket" and str(field.value).strip() == ticket_id:
                         await msg.edit(embed=embed)
                         return
+            print(f"[Sentinel] Public acknowledgement message not found for {ticket_id} near public report {message_id}")
         except Exception as e:
             print(f"[Sentinel] Failed to update public status embed for {ticket_id}: {e}")
 
@@ -935,10 +950,13 @@ class SentinelBugwatch(commands.Cog):
             severity=record.severity,
             affected_system=record.affected_system,
         )
+        public_msg = None
         try:
-            await message.reply(embed=public, mention_author=True)
+            public_msg = await message.reply(embed=public, mention_author=True)
         except Exception:
-            await message.channel.send(embed=public)
+            public_msg = await message.channel.send(embed=public)
+        if public_msg:
+            await self._update_ticket_row_by_id(record.ticket_id, {"public_ack_message_id": str(public_msg.id)})
         return record
 
     async def _append_followup(self, message: discord.Message, intake: IntakeState) -> None:
