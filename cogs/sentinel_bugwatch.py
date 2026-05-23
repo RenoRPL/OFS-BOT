@@ -752,6 +752,93 @@ class SentinelBugwatch(commands.Cog):
         embed.add_field(name="Next Recommended Step", value=_truncate_field(recommendation or "Awaiting triage."), inline=False)
         return embed
 
+    def _build_public_status_embed(
+        self,
+        ticket_id: str,
+        report_type: str,
+        status: str,
+        verification: str,
+        severity: str,
+        affected_system: str,
+    ) -> discord.Embed:
+        verification_l = (verification or "").lower()
+        if verification_l in {"confirmed bug", "reproduced"}:
+            description = "Your report has been confirmed/reproduced and is now under IT review."
+            important = (
+                "Evidence or admin reproduction has verified this report. "
+                "The Sentinel is tracking it for Oracle/IT review; repair actions still require Oner approval."
+            )
+        elif (status or "").lower() in {"in review", "fix proposed", "resolved pending verification"}:
+            description = "Your report is under IT review."
+            important = "The Sentinel is tracking this report. Further updates will appear as triage/admin review progresses."
+        elif (status or "").lower() == "dismissed":
+            description = "Your report has been reviewed and dismissed by triage."
+            important = "No repair action is planned unless Oner or IT reopens the report with new evidence."
+        else:
+            description = "Thank you. Your report has been submitted for IT review."
+            important = "This report is not considered a confirmed bug until evidence, reproduction, or admin review verifies it."
+
+        embed = discord.Embed(
+            title=f"✅ Report Submitted to {SENTINEL_NAME}",
+            description=description,
+            color=_ticket_color(severity or "Unknown", status or "Submitted"),
+            timestamp=_now_utc(),
+        )
+        embed.add_field(name="Ticket", value=ticket_id or "Unknown", inline=True)
+        embed.add_field(name="Type", value=report_type or "Unknown", inline=True)
+        embed.add_field(name="Status", value=status or "Unknown", inline=True)
+        embed.add_field(name="Verification", value=verification or "Unverified", inline=True)
+        embed.add_field(name="Severity", value=severity or "Unknown", inline=True)
+        embed.add_field(name="Affected System", value=affected_system or "Unknown", inline=True)
+        embed.add_field(name="Important", value=important, inline=False)
+        return embed
+
+    async def _update_public_status_embed(
+        self,
+        ticket_id: str,
+        row: List[str],
+        hmap: Dict[str, int],
+        updates: Optional[Dict[int, str]] = None,
+    ) -> None:
+        updates = updates or {}
+        channel_id = _get_row_value(row, hmap.get("public_channel_id"))
+        message_id = _get_row_value(row, hmap.get("public_message_id"))
+        if not channel_id.isdigit() or not message_id.isdigit():
+            return
+
+        def val(key: str, fallback: str = "") -> str:
+            idx = hmap.get(key)
+            if idx is None:
+                return fallback
+            return updates.get(idx, _get_row_value(row, idx) or fallback)
+
+        embed = self._build_public_status_embed(
+            ticket_id=ticket_id,
+            report_type=val("type", "Bug"),
+            status=val("status", "Submitted"),
+            verification=val("verification", "Unverified"),
+            severity=val("severity", "Unknown"),
+            affected_system=val("affected_system", "Unknown"),
+        )
+
+        try:
+            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+            if not isinstance(channel, discord.TextChannel):
+                return
+            original_msg = await channel.fetch_message(int(message_id))
+            async for msg in channel.history(limit=35, after=original_msg):
+                if not msg.author.bot or not msg.embeds:
+                    continue
+                candidate = msg.embeds[0]
+                if not (candidate.title or "").startswith(f"✅ Report Submitted to {SENTINEL_NAME}"):
+                    continue
+                for field in candidate.fields:
+                    if field.name == "Ticket" and field.value == ticket_id:
+                        await msg.edit(embed=embed)
+                        return
+        except Exception as e:
+            print(f"[Sentinel] Failed to update public status embed for {ticket_id}: {e}")
+
     async def _update_workspace_embed(
         self,
         thread_id: str,
@@ -840,22 +927,13 @@ class SentinelBugwatch(commands.Cog):
         )
 
         intake.submitted_ticket_id = record.ticket_id
-        public = discord.Embed(
-            title=f"✅ Report Submitted to {SENTINEL_NAME}",
-            description="Thank you. Your report has been submitted for IT review.",
-            color=_ticket_color(record.severity, record.status),
-            timestamp=_now_utc(),
-        )
-        public.add_field(name="Ticket", value=record.ticket_id, inline=True)
-        public.add_field(name="Type", value=record.report_type, inline=True)
-        public.add_field(name="Status", value=record.status, inline=True)
-        public.add_field(name="Verification", value=record.verification, inline=True)
-        public.add_field(name="Severity", value=record.severity, inline=True)
-        public.add_field(name="Affected System", value=record.affected_system, inline=True)
-        public.add_field(
-            name="Important",
-            value="This report is not considered a confirmed bug until evidence, reproduction, or admin review verifies it.",
-            inline=False,
+        public = self._build_public_status_embed(
+            ticket_id=record.ticket_id,
+            report_type=record.report_type,
+            status=record.status,
+            verification=record.verification,
+            severity=record.severity,
+            affected_system=record.affected_system,
         )
         try:
             await message.reply(embed=public, mention_author=True)
@@ -1047,6 +1125,8 @@ class SentinelBugwatch(commands.Cog):
         if confirmation_detected and "next_step" in hmap:
             updates[hmap["next_step"]] = "Prepare Oracle brief from the ticket thread and gathered evidence."
         await self._update_cells(ws, row_num, updates)
+        if confirmation_detected:
+            await self._update_public_status_embed(ticket_id, row, hmap, updates)
 
         if confirmation_detected:
             admin_msg_id = _get_row_value(row, hmap.get("admin_message_id"))
@@ -1274,12 +1354,12 @@ class SentinelBugwatch(commands.Cog):
             if "recommendation" in hmap:
                 updates[hmap["recommendation"]] = recommendation
             if "next_step" in hmap:
-                updates[hmap["next_step"]] = "The Oracle has been mentioned in-thread with a concise investigation request. Await Oracle reasoning or gateway response."
+                updates[hmap["next_step"]] = "The Oracle has been mentioned in-thread with a concise investigation request. If Oracle does not answer, a human must reply to the handoff and mention The Oracle because bot-authored mentions may be ignored by gateway routing."
             report_section = f"**Reporter Claim**\n{_truncate_field(original_report, 800)}\n\n"
             if not _same_meaning(original_report, current_summary):
                 report_section += f"**Current Summary**\n{_truncate_field(current_summary, 600)}\n\n"
             oracle_mention = _oracle_mention()
-            thread_content = f"{oracle_mention} Oracle investigation requested for **{ticket_id}**. Reason over the evidence below and propose next steps only."
+            thread_content = f"{oracle_mention} Oracle investigation requested for **{ticket_id}**. Reason over the evidence below and propose next steps only. If The Oracle does not answer, Oner/IT should reply to this handoff and mention The Oracle manually; Discord gateway routing may ignore bot-authored mentions."
             thread_note_title = f"🧠 Oracle Investigation Request — {ticket_id}"
             thread_note = (
                 f"Prepared by: {interaction.user.mention}\n"
@@ -1295,7 +1375,8 @@ class SentinelBugwatch(commands.Cog):
                 "4. recommended inspection steps\n"
                 "5. what approval is required before any code or deployment action\n\n"
                 f"**Recommended Direction**\n{recommendation}\n\n"
-                "**Boundary**\nReasoning only. No code edits, commits, deployments, restarts, ticket closure, role changes, message deletions, or non-intake Sheet mutations without Oner approval."
+                "**Boundary**\nReasoning only. No code edits, commits, deployments, restarts, ticket closure, role changes, message deletions, or non-intake Sheet mutations without Oner approval.\n\n"
+                "**Routing Note**\nIf The Oracle does not answer this bot-authored mention, Oner/IT must reply to this handoff and mention The Oracle manually. The Discord gateway may intentionally ignore messages written by another bot."
             )
 
         if "updated_at" in hmap:
@@ -1304,6 +1385,7 @@ class SentinelBugwatch(commands.Cog):
             updates[hmap["last_updated_by"]] = f"{interaction.user} ({interaction.user.id})"
 
         await self._update_cells(ws, row_num, updates)
+        await self._update_public_status_embed(ticket_id, row, hmap, updates)
 
         # Update admin embed if possible by rebuilding lightweight fields in place.
         target_message = interaction.message if interaction.message and interaction.message.embeds and not admin_message_id_override else None
