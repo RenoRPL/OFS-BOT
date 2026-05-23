@@ -10,6 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import asyncio
 from datetime import datetime
+from urllib.parse import quote
 from utils.google_auth import open_spreadsheet
 
 class QuestMakerView(discord.ui.View):
@@ -1731,6 +1732,33 @@ class ActiveQuestManageView(discord.ui.View):
     def __init__(self, join_quest_view: "JoinQuestView"):
         super().__init__(timeout=60)
         self.join_quest_view = join_quest_view
+
+        # The visible quest-management menu is intentionally restricted to two actions:
+        # 1) Complete Quest -> opens the website editor/completion flow.
+        # 2) Cancel Quest -> keeps the existing Discord cancellation flow.
+        # Decorated legacy management buttons remain below for reference/internal reuse, but are
+        # removed from this view so leaders only see the approved two-button interface.
+        self.clear_items()
+
+        quest_url = f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(self.join_quest_view.patrol_id), safe='')}"
+        self.add_item(discord.ui.Button(
+            label="Complete Quest",
+            style=discord.ButtonStyle.link,
+            emoji="✅",
+            url=quest_url
+        ))
+
+        cancel_button = discord.ui.Button(
+            label="Cancel Quest",
+            style=discord.ButtonStyle.danger,
+            emoji="❌"
+        )
+
+        async def cancel_callback(interaction: discord.Interaction):
+            await self.cancel_quest(interaction, cancel_button)
+
+        cancel_button.callback = cancel_callback
+        self.add_item(cancel_button)
     
     @discord.ui.button(label="Complete Quest", style=discord.ButtonStyle.success, emoji="✅")
     async def complete_quest(self, interaction: discord.Interaction, button: discord.ui.Button):
