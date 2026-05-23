@@ -110,6 +110,22 @@ EXPLICIT_EVIDENCE_PREFIXES = {
     "verification",
     "verified",
 }
+COMPLETION_PHRASES = (
+    "mark this complete",
+    "mark as complete",
+    "mark complete",
+    "complete this",
+    "complete ticket",
+    "close this",
+    "close ticket",
+    "that fixed it",
+    "this is fixed",
+    "bug is fixed",
+    "fixed it",
+    "resolved",
+    "issue resolved",
+    "finish this",
+)
 
 # Common header aliases. The code writes only when the matching header exists.
 HEADER_ALIASES: Dict[str, List[str]] = {
@@ -381,6 +397,19 @@ def _explicit_evidence_guidance(ticket_id: str) -> str:
     )
 
 
+def _is_completion_intent(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if not lowered:
+        return False
+    if any(phrase in lowered for phrase in COMPLETION_PHRASES):
+        return True
+    return bool(
+        re.search(r"\bmark\b.{0,80}\bcomplete\b", lowered)
+        or re.search(r"\b(close|finish)\b.{0,80}\b(ticket|report|bug)\b", lowered)
+        or re.search(r"\b(bug|issue|report|fix)\b.{0,80}\b(fixed|resolved|complete|completed)\b", lowered)
+    )
+
+
 def _extract_reproduction_notes(thread_facts: str) -> List[str]:
     notes: List[str] = []
     for line in (thread_facts or "").splitlines():
@@ -416,13 +445,20 @@ def _evidence_summary(evidence: str, attachments: str, thread_facts: str) -> str
 def _ticket_description_for(verification: str, status: str) -> str:
     verification_l = (verification or "").lower()
     status_l = (status or "").lower()
+    if status_l == "completed":
+        return (
+            "This report has been marked **Completed** by the primary approver after Oracle/IT review. "
+            "The Sentinel has closed the active bug record and synchronized the public status."
+        )
+    if status_l == "dismissed":
+        return "This report has been dismissed by an authorized admin. No code changes were made by The Sentinel."
+    if status_l == "duplicate":
+        return "This report has been classified as a duplicate and linked/handled through the primary ticket record."
     if verification_l in {"confirmed bug", "reproduced"}:
         return (
             "Evidence or admin reproduction has been logged for this report. "
             "The Sentinel is preserving the record for Oracle review; no repair action is approved until explicitly authorized."
         )
-    if status_l == "dismissed":
-        return "This report has been dismissed by an authorized admin. No code changes were made by The Sentinel."
     return (
         "A user-submitted report has entered IT review. "
         "This is an **unverified claim** until evidence or reproduction confirms it."
@@ -430,7 +466,22 @@ def _ticket_description_for(verification: str, status: str) -> str:
 
 
 def _ticket_color(severity: str, status: str = "") -> discord.Color:
-    if status.lower() == "dismissed":
+    status_l = (status or "").lower()
+    if status_l == "completed":
+        return discord.Color.green()
+    if status_l == "resolved pending verification":
+        return discord.Color.teal()
+    if status_l == "fix proposed":
+        return discord.Color.purple()
+    if status_l == "in review":
+        return discord.Color.blurple()
+    if status_l == "confirmed bug":
+        return discord.Color.orange()
+    if status_l == "needs verification":
+        return discord.Color.gold()
+    if status_l in {"needs info", "duplicate"}:
+        return discord.Color.light_grey()
+    if status_l == "dismissed":
         return discord.Color.dark_grey()
     sev = (severity or "").lower()
     if sev == "critical":
@@ -810,16 +861,20 @@ class SentinelBugwatch(commands.Cog):
         affected_system: str,
     ) -> discord.Embed:
         verification_l = (verification or "").lower()
-        if verification_l in {"confirmed bug", "reproduced"}:
+        status_l = (status or "").lower()
+        if status_l == "completed":
+            description = "This report has been completed and closed by OFS IT."
+            important = "The Sentinel has marked this bug report resolved. Thank you for helping improve OFS systems."
+        elif verification_l in {"confirmed bug", "reproduced"}:
             description = "Your report has been confirmed/reproduced and is now under IT review."
             important = (
                 "Evidence or admin reproduction has verified this report. "
                 "The Sentinel is tracking it for Oracle/IT review; repair actions still require Oner approval."
             )
-        elif (status or "").lower() in {"in review", "fix proposed", "resolved pending verification"}:
+        elif status_l in {"in review", "fix proposed", "resolved pending verification"}:
             description = "Your report is under IT review."
             important = "The Sentinel is tracking this report. Further updates will appear as triage/admin review progresses."
-        elif (status or "").lower() == "dismissed":
+        elif status_l == "dismissed":
             description = "Your report has been reviewed and dismissed by triage."
             important = "No repair action is planned unless Oner or IT reopens the report with new evidence."
         else:
@@ -1205,6 +1260,93 @@ class SentinelBugwatch(commands.Cog):
             return True
         return False
 
+    async def _complete_ticket_from_message(
+        self,
+        message: discord.Message,
+        ws: Any,
+        row: List[str],
+        hmap: Dict[str, int],
+        row_num: int,
+        ticket_id: str,
+        text: str,
+    ) -> None:
+        """Mark a ticket complete everywhere after primary approver completion intent."""
+        now = _now_iso()
+        severity = _get_row_value(row, hmap.get("severity")) or "Unknown"
+        verification = _get_row_value(row, hmap.get("verification")) or "Confirmed Bug"
+        if verification.lower() in {"", "unverified", "unknown"}:
+            verification = "Confirmed Bug"
+        recommendation = "Completed by primary approver after Oracle/IT review. No further Sentinel action pending."
+        resolution = f"[{now}] Completed by {message.author} ({message.author.id}) from ticket thread: {text or 'completion requested'}"
+
+        updates: Dict[int, str] = {}
+        if "status" in hmap:
+            updates[hmap["status"]] = "Completed"
+        if "verification" in hmap:
+            updates[hmap["verification"]] = verification
+        if "recommendation" in hmap:
+            updates[hmap["recommendation"]] = recommendation
+        if "next_step" in hmap:
+            updates[hmap["next_step"]] = "Closed. Bug report completed by primary approver after Oracle/IT review."
+        if "resolution_notes" in hmap:
+            updates[hmap["resolution_notes"]] = _append_note(_get_row_value(row, hmap["resolution_notes"]), resolution)
+        if "closed_at" in hmap:
+            updates[hmap["closed_at"]] = now
+        if "updated_at" in hmap:
+            updates[hmap["updated_at"]] = now
+        if "last_updated_by" in hmap:
+            updates[hmap["last_updated_by"]] = f"{message.author} ({message.author.id})"
+
+        await self._update_cells(ws, row_num, updates)
+        await self._update_public_status_embed(ticket_id, row, hmap, updates)
+
+        admin_msg_id = _get_row_value(row, hmap.get("admin_message_id"))
+        if admin_msg_id.isdigit():
+            try:
+                admin_channel = self.bot.get_channel(ADMIN_REPORT_CHANNEL_ID) or await self.bot.fetch_channel(ADMIN_REPORT_CHANNEL_ID)
+                if isinstance(admin_channel, discord.TextChannel):
+                    admin_msg = await admin_channel.fetch_message(int(admin_msg_id))
+                    if admin_msg.embeds:
+                        embed = admin_msg.embeds[0]
+                        embed.description = _ticket_description_for(verification, "Completed")
+                        embed.color = _ticket_color(severity, "Completed")
+                        found_recommendation = False
+                        for i, field in enumerate(embed.fields):
+                            if field.name == "Status":
+                                embed.set_field_at(i, name="Status", value="Completed", inline=True)
+                            elif field.name == "Verification":
+                                embed.set_field_at(i, name="Verification", value=verification, inline=True)
+                            elif field.name == "Oracle Recommendation":
+                                found_recommendation = True
+                                embed.set_field_at(i, name="Oracle Recommendation", value=recommendation, inline=False)
+                        if not found_recommendation:
+                            embed.add_field(name="Oracle Recommendation", value=recommendation, inline=False)
+                        await admin_msg.edit(embed=embed, view=self._ticket_view)
+            except Exception as e:
+                print(f"[Sentinel] Failed to update completed admin embed for {ticket_id}: {e}")
+
+        thread_id = _get_row_value(row, hmap.get("admin_thread_id")) or str(getattr(message.channel, "id", ""))
+        await self._update_workspace_embed(thread_id, ticket_id, "Completed", verification, severity, recommendation)
+
+        complete_embed = discord.Embed(
+            title=f"✅ Ticket Completed — {ticket_id}",
+            description=(
+                f"Marked complete by {message.author.mention}.\n\n"
+                "The Sentinel synchronized the Sheet record, admin card, workspace card, and public bug-report status."
+            ),
+            color=discord.Color.green(),
+            timestamp=_now_utc(),
+        )
+        complete_embed.add_field(name="Status", value="Completed", inline=True)
+        complete_embed.add_field(name="Verification", value=verification, inline=True)
+        complete_embed.add_field(name="Resolution", value=_truncate_field(text or "Completion approved in-thread.", 700), inline=False)
+        await message.channel.send(embed=complete_embed)
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+        print(f"[Sentinel] Completed ticket {ticket_id} from primary approver message {message.id}")
+
     async def _is_oracle_discussion_message(self, message: discord.Message) -> bool:
         """Do not auto-log human replies that are part of Oracle troubleshooting chat.
 
@@ -1231,12 +1373,6 @@ class SentinelBugwatch(commands.Cog):
         # Thread messages become evidence only for whitelisted admins / primary approver.
         if not await self._is_whitelisted_admin(message.author.id):
             return
-        if await self._is_oracle_discussion_message(message):
-            try:
-                await message.add_reaction("👁️")
-            except Exception:
-                pass
-            return
         text = _clean_text(message.content or "")
         attachment_urls = [a.url for a in message.attachments]
         if not text and not attachment_urls:
@@ -1247,6 +1383,16 @@ class SentinelBugwatch(commands.Cog):
             return
 
         ticket_id = _get_row_value(row, hmap.get("ticket_id"))
+        if int(message.author.id) == PRIMARY_APPROVER_ID and text and _is_completion_intent(text):
+            await self._complete_ticket_from_message(message, ws, row, hmap, row_num, ticket_id, text)
+            return
+
+        if await self._is_oracle_discussion_message(message):
+            try:
+                await message.add_reaction("👁️")
+            except Exception:
+                pass
+            return
         if self._requires_explicit_evidence_marker(row, hmap) and not self._has_explicit_evidence_marker(message):
             try:
                 await message.add_reaction("👁️")
