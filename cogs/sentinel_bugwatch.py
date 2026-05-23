@@ -335,6 +335,31 @@ class SentinelTextModal(discord.ui.Modal):
         await self.cog.handle_ticket_action(interaction, self.action, str(self.value.value))
 
 
+class SentinelChoiceSelect(discord.ui.Select):
+    def __init__(self, cog: "SentinelBugwatch", action: str, values: List[str], placeholder: str, ticket_id: str, admin_message_id: int):
+        options = [discord.SelectOption(label=value, value=value) for value in values[:25]]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+        self.cog = cog
+        self.action = action
+        self.ticket_id = ticket_id
+        self.admin_message_id = admin_message_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_ticket_action(
+            interaction,
+            self.action,
+            self.values[0],
+            ticket_id_override=self.ticket_id,
+            admin_message_id_override=self.admin_message_id,
+        )
+
+
+class SentinelChoiceView(discord.ui.View):
+    def __init__(self, cog: "SentinelBugwatch", action: str, values: List[str], placeholder: str, ticket_id: str, admin_message_id: int):
+        super().__init__(timeout=180)
+        self.add_item(SentinelChoiceSelect(cog, action, values, placeholder, ticket_id, admin_message_id))
+
+
 class SentinelTicketView(discord.ui.View):
     def __init__(self, cog: "SentinelBugwatch"):
         super().__init__(timeout=None)
@@ -342,14 +367,14 @@ class SentinelTicketView(discord.ui.View):
 
     @discord.ui.button(label="Set Severity", style=discord.ButtonStyle.primary, custom_id="sentinel:set_severity")
     async def set_severity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(
-            SentinelTextModal(
-                self.cog,
-                "severity",
-                "Set Ticket Severity",
-                "Severity",
-                f"One of: {', '.join(SEVERITIES)}",
-            )
+        ticket_id = self.cog._extract_ticket_id_from_interaction(interaction)
+        if not ticket_id or not interaction.message:
+            await interaction.response.send_message("Unable to identify ticket for this action.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the new ticket severity:",
+            view=SentinelChoiceView(self.cog, "severity", SEVERITIES, "Choose severity", ticket_id, interaction.message.id),
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Dismiss Report", style=discord.ButtonStyle.danger, custom_id="sentinel:dismiss")
@@ -366,15 +391,19 @@ class SentinelTicketView(discord.ui.View):
 
     @discord.ui.button(label="Set Status", style=discord.ButtonStyle.secondary, custom_id="sentinel:set_status")
     async def set_status(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(
-            SentinelTextModal(
-                self.cog,
-                "status",
-                "Set Ticket Status",
-                "Status",
-                f"One of: {', '.join(STATUSES[:6])}...",
-            )
+        ticket_id = self.cog._extract_ticket_id_from_interaction(interaction)
+        if not ticket_id or not interaction.message:
+            await interaction.response.send_message("Unable to identify ticket for this action.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the new ticket status:",
+            view=SentinelChoiceView(self.cog, "status", STATUSES, "Choose status", ticket_id, interaction.message.id),
+            ephemeral=True,
         )
+
+    @discord.ui.button(label="Request Oracle Inspection", style=discord.ButtonStyle.success, custom_id="sentinel:request_oracle")
+    async def request_oracle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handle_ticket_action(interaction, "oracle_inspection", "Requested")
 
 
 # ---------------------------------------------------------------------------
@@ -885,7 +914,51 @@ class SentinelBugwatch(commands.Cog):
             updates[hmap["updated_at"]] = _now_iso()
         if "last_updated_by" in hmap:
             updates[hmap["last_updated_by"]] = f"{message.author} ({message.author.id})"
+        confirmation_terms = ("confirm", "confirmed", "verified", "reproduced", "i can reproduce", "i tested", "same issue")
+        confirmation_detected = bool(text and any(term in text.lower() for term in confirmation_terms))
+        new_verification = "Confirmed Bug" if int(message.author.id) == PRIMARY_APPROVER_ID else "Reproduced"
+        if confirmation_detected and "verification" in hmap:
+            updates[hmap["verification"]] = new_verification
         await self._update_cells(ws, row_num, updates)
+
+        if confirmation_detected:
+            admin_msg_id = _get_row_value(row, hmap.get("admin_message_id"))
+            if admin_msg_id.isdigit():
+                try:
+                    admin_channel = self.bot.get_channel(ADMIN_REPORT_CHANNEL_ID) or await self.bot.fetch_channel(ADMIN_REPORT_CHANNEL_ID)
+                    if isinstance(admin_channel, discord.TextChannel):
+                        admin_msg = await admin_channel.fetch_message(int(admin_msg_id))
+                        if admin_msg.embeds:
+                            embed = admin_msg.embeds[0]
+                            for i, field in enumerate(embed.fields):
+                                if field.name == "Verification":
+                                    embed.set_field_at(i, name="Verification", value=new_verification, inline=True)
+                                    break
+                            await admin_msg.edit(embed=embed, view=self._ticket_view)
+                except Exception as e:
+                    print(f"[Sentinel] Failed to update verification embed for {ticket_id}: {e}")
+
+        visible = discord.Embed(
+            title="✅ Evidence Logged" if not confirmation_detected else "✅ Confirmation Logged",
+            description=_truncate_field(text or "Attachment-only evidence", 900),
+            color=discord.Color.green() if confirmation_detected else discord.Color.blue(),
+            timestamp=_now_utc(),
+        )
+        visible.add_field(name="Ticket", value=ticket_id or "Unknown", inline=True)
+        visible.add_field(name="Logged By", value=message.author.mention, inline=True)
+        if confirmation_detected:
+            visible.add_field(name="Verification", value=new_verification, inline=True)
+            visible.add_field(
+                name="Next Step",
+                value=(
+                    "Use **Request Oracle Inspection** on the ticket card to gather facts into an inspection request. "
+                    "No patch, deployment, restart, or completion is approved by confirmation alone."
+                ),
+                inline=False,
+            )
+        elif attachment_urls:
+            visible.add_field(name="Attachment URLs", value=_truncate_field("\n".join(attachment_urls), 900), inline=False)
+        await message.channel.send(embed=visible)
         try:
             await message.add_reaction("📝")
         except Exception:
@@ -895,9 +968,16 @@ class SentinelBugwatch(commands.Cog):
     # ----------------------------
     # Button / modal actions
     # ----------------------------
-    async def handle_ticket_action(self, interaction: discord.Interaction, action: str, value: str) -> None:
+    async def handle_ticket_action(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        value: str,
+        ticket_id_override: str = "",
+        admin_message_id_override: Optional[int] = None,
+    ) -> None:
         user_id = int(interaction.user.id)
-        ticket_id = self._extract_ticket_id_from_interaction(interaction)
+        ticket_id = ticket_id_override or self._extract_ticket_id_from_interaction(interaction)
         if not ticket_id:
             await interaction.response.send_message("Unable to identify ticket for this action.", ephemeral=True)
             return
@@ -913,6 +993,10 @@ class SentinelBugwatch(commands.Cog):
             if not is_primary:
                 await interaction.response.send_message(f"⛔ Only <@{PRIMARY_APPROVER_ID}> may change ticket status.", ephemeral=True)
                 return
+        elif action == "oracle_inspection":
+            if not is_primary:
+                await interaction.response.send_message(f"⛔ Only <@{PRIMARY_APPROVER_ID}> may request Oracle inspection.", ephemeral=True)
+                return
         else:
             await interaction.response.send_message("Unknown Sentinel action.", ephemeral=True)
             return
@@ -920,7 +1004,9 @@ class SentinelBugwatch(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            ws, headers, hmap, row, row_num = await self._find_ticket_by_message_or_thread(message_id=interaction.message.id if interaction.message else None)
+            ws, headers, hmap, row, row_num = await self._find_ticket_by_message_or_thread(
+                message_id=admin_message_id_override or (interaction.message.id if interaction.message else None)
+            )
         except Exception as e:
             await interaction.followup.send(f"Ticket row not found: `{e}`", ephemeral=True)
             return
@@ -980,6 +1066,25 @@ class SentinelBugwatch(commands.Cog):
             thread_note_title = "📌 Status Updated"
             thread_note = f"Updated by: {interaction.user.mention}\nOld Status: **{old_status or 'Unknown'}**\nNew Status: **{new_value}**"
 
+        elif action == "oracle_inspection":
+            if "status" in hmap:
+                updates[hmap["status"]] = "In Review"
+            if "next_step" in hmap:
+                updates[hmap["next_step"]] = "Oracle inspection requested by primary approver. Review gathered facts in the ticket thread before proposing action."
+            thread_note_title = "🔍 Oracle Inspection Requested"
+            summary = _get_row_value(row, hmap.get("summary")) or "No summary recorded."
+            evidence = _get_row_value(row, hmap.get("evidence_log")) or _get_row_value(row, hmap.get("admin_notes")) or "No admin evidence logged yet."
+            attachments = _get_row_value(row, hmap.get("attachments")) or "No attachment URLs recorded."
+            thread_note = (
+                f"Requested by: {interaction.user.mention}\n"
+                f"Status: **In Review**\n\n"
+                f"**Gathered Facts**\n"
+                f"Summary: {_truncate_field(summary, 600)}\n\n"
+                f"Evidence: {_truncate_field(evidence, 800)}\n\n"
+                f"Attachments: {_truncate_field(attachments, 500)}\n\n"
+                "The Oracle may now inspect and propose next actions, but no patch, deployment, restart, or completion is approved by this request alone."
+            )
+
         if "updated_at" in hmap:
             updates[hmap["updated_at"]] = _now_iso()
         if "last_updated_by" in hmap:
@@ -988,18 +1093,29 @@ class SentinelBugwatch(commands.Cog):
         await self._update_cells(ws, row_num, updates)
 
         # Update admin embed if possible by rebuilding lightweight fields in place.
-        if interaction.message and interaction.message.embeds:
-            embed = interaction.message.embeds[0]
+        target_message = interaction.message if interaction.message and interaction.message.embeds and not admin_message_id_override else None
+        if target_message is None:
+            msg_id = admin_message_id_override or int(_get_row_value(row, hmap.get("admin_message_id")) or 0)
+            if msg_id:
+                try:
+                    admin_channel = self.bot.get_channel(ADMIN_REPORT_CHANNEL_ID) or await self.bot.fetch_channel(ADMIN_REPORT_CHANNEL_ID)
+                    if isinstance(admin_channel, discord.TextChannel):
+                        target_message = await admin_channel.fetch_message(msg_id)
+                except Exception as e:
+                    print(f"[Sentinel] Failed to fetch admin message for {ticket_id}: {e}")
+
+        if target_message and target_message.embeds:
+            embed = target_message.embeds[0]
             current_status = updates.get(hmap.get("status", -1), old_status) if hmap else old_status
             current_sev = updates.get(hmap.get("severity", -1), old_severity) if hmap else old_severity
             embed.color = _ticket_color(current_sev or old_severity, current_status or old_status)
             for i, field in enumerate(embed.fields):
                 if field.name == "Severity" and action == "severity":
                     embed.set_field_at(i, name="Severity", value=updates.get(hmap.get("severity", -1), old_severity), inline=True)
-                if field.name == "Status" and action in {"status", "dismiss"}:
+                if field.name == "Status" and action in {"status", "dismiss", "oracle_inspection"}:
                     embed.set_field_at(i, name="Status", value=updates.get(hmap.get("status", -1), "Dismissed"), inline=True)
             try:
-                await interaction.message.edit(embed=embed, view=self._ticket_view)
+                await target_message.edit(embed=embed, view=self._ticket_view)
             except Exception as e:
                 print(f"[Sentinel] Failed to update admin embed for {ticket_id}: {e}")
 
