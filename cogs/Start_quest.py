@@ -36,6 +36,19 @@ class QuestMakerView(discord.ui.View):
         self.image_upload_interaction = None  # Store image upload interaction for cleanup
         self.emoji_picker_interaction = None  # Store emoji picker interaction for cleanup
         self.creating_quest = False  # Prevent double-tapping create quest button
+
+        # Keep the main Quest Maker controls compact. Detailed edit/template
+        # actions are exposed through grouped sub-menus below.
+        grouped_labels = {
+            "Set Description",
+            "Set Image",
+            "Set Length",
+            "Set Scroll",
+            "Load Template",
+        }
+        for item in list(self.children):
+            if item.label in grouped_labels or str(item.emoji) == "⚙️":
+                self.remove_item(item)
     
     def create_embed(self):
         embed = discord.Embed(
@@ -46,7 +59,6 @@ class QuestMakerView(discord.ui.View):
         embed.add_field(name="Quest ID", value=f"`{self.quest_id}`", inline=True)
         embed.add_field(name="Type", value=self.quest_type, inline=True)
         embed.add_field(name="Game", value=self.game, inline=True)
-        embed.add_field(name="Length", value=f"{self.quest_length} minutes", inline=True)
         embed.add_field(name="Quest Leader", value=self.leader.mention, inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Empty field for spacing
         embed.add_field(name="Quest Name", value=self.quest_name or "*Not set*", inline=False)
@@ -88,10 +100,14 @@ class QuestMakerView(discord.ui.View):
             except Exception as e:
                 print(f"Failed to update original message: {e}")
     
-    @discord.ui.button(label="Set Name", style=discord.ButtonStyle.secondary, emoji="📝")
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.secondary, emoji="✏️")
     async def set_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = QuestNameModal(self)
-        await interaction.response.send_modal(modal)
+        edit_embed = discord.Embed(
+            title="✏️ Edit Quest Details",
+            description="Choose which quest detail to update:",
+            color=0x0099ff
+        )
+        await interaction.response.send_message(embed=edit_embed, view=QuestEditDetailsView(self), ephemeral=True)
     
     @discord.ui.button(label="Set Description", style=discord.ButtonStyle.secondary, emoji="📄")
     async def set_description(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -351,7 +367,6 @@ class QuestMakerView(discord.ui.View):
         )
         embed.add_field(name="Quest Leader", value=self.leader.mention, inline=True)
         embed.add_field(name="Quest ID", value=f"`{self.quest_id}`", inline=True)
-        embed.add_field(name="Quest Duration", value=f"{self.quest_length} minutes", inline=True)
         embed.add_field(name="Rank:", value=self.leader_info.get("rank", "Unknown"), inline=True)
         embed.add_field(name="Banner:", value=self.leader_info.get("banner", "Unassigned"), inline=True)
         
@@ -627,14 +642,14 @@ class QuestMakerView(discord.ui.View):
         print(f"✅ Quest {self.quest_id} saved to Google Sheets")
         return f"P{self.guild_id}-{self.quest_id}"  # Return the Patrol ID with guild prefix for forum posting
     
-    @discord.ui.button(label="Save Template", style=discord.ButtonStyle.secondary, emoji="💾", row=1)
+    @discord.ui.button(label="Template", style=discord.ButtonStyle.secondary, emoji="📂", row=1)
     async def save_template(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.quest_name or not self.quest_description:
-            await interaction.response.send_message("❌ Please set both Quest Name and Description before saving template.", ephemeral=True)
-            return
-        
-        modal = SaveTemplateModal(self)
-        await interaction.response.send_modal(modal)
+        template_embed = discord.Embed(
+            title="📂 Quest Templates",
+            description="Choose a template action:",
+            color=0x0099ff
+        )
+        await interaction.response.send_message(embed=template_embed, view=QuestTemplateActionsView(self), ephemeral=True)
     
     @discord.ui.button(label="Load Template", style=discord.ButtonStyle.secondary, emoji="📂", row=1)
     async def load_template(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -739,6 +754,104 @@ class QuestMakerView(discord.ui.View):
             return True
         return False
 
+class QuestEditDetailsView(discord.ui.View):
+    def __init__(self, quest_view: QuestMakerView):
+        super().__init__(timeout=120)
+        self.quest_view = quest_view
+
+    @discord.ui.button(label="Set Name", style=discord.ButtonStyle.secondary, emoji="📝")
+    async def set_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(QuestNameModal(self.quest_view))
+
+    @discord.ui.button(label="Set Description", style=discord.ButtonStyle.secondary, emoji="📄")
+    async def set_description(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(QuestDescriptionModal(self.quest_view))
+
+    @discord.ui.button(label="Set Image", style=discord.ButtonStyle.secondary, emoji="🖼️")
+    async def set_image(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.quest_view.image_upload_interaction = interaction
+        await interaction.response.send_message(
+            "📷 **How to add a custom image:**\n"
+            "1. Upload your image to any Discord channel\n"
+            "2. Right-click the uploaded image\n"
+            "3. Select **Copy Link**\n"
+            "4. Click the button below and paste the link\n\n"
+            "*Or leave blank to use the default image*",
+            ephemeral=True,
+            view=ImageUploadView(self.quest_view)
+        )
+
+    @discord.ui.button(label="Set Scroll", style=discord.ButtonStyle.secondary, emoji="📜")
+    async def set_scroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.quest_view.emoji_picker_interaction = interaction
+        emoji_view = EmojiSelectView(self.quest_view)
+        scroll_embed = discord.Embed(
+            title="📜 Choose Quest Scroll Emoji",
+            description="Select an emoji from the dropdown below that will appear in your quest forum post title:",
+            color=0x0099ff
+        )
+        scroll_embed.add_field(name="Current Emoji", value=f"{self.quest_view.quest_scroll}", inline=True)
+        scroll_embed.add_field(name="Preview", value=f"{self.quest_view.quest_scroll} Your Quest Name", inline=True)
+        await interaction.response.send_message(embed=scroll_embed, view=emoji_view, ephemeral=True)
+
+class QuestTemplateActionsView(discord.ui.View):
+    def __init__(self, quest_view: QuestMakerView):
+        super().__init__(timeout=120)
+        self.quest_view = quest_view
+
+    @discord.ui.button(label="Save Template", style=discord.ButtonStyle.secondary, emoji="💾")
+    async def save_template(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.quest_view.quest_name or not self.quest_view.quest_description:
+            await interaction.response.send_message("❌ Please set both Quest Name and Description before saving template.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SaveTemplateModal(self.quest_view))
+
+    @discord.ui.button(label="Load Template", style=discord.ButtonStyle.secondary, emoji="📂")
+    async def load_template(self, interaction: discord.Interaction, button: discord.ui.Button):
+        templates = self.quest_view.get_guild_templates()
+        if not templates:
+            await interaction.response.send_message("❌ No templates found for this server.", ephemeral=True)
+            return
+        
+        game_templates = {}
+        for template_name, template_data in templates.items():
+            if template_data.get('game') == self.quest_view.game:
+                game_templates[template_name] = template_data
+        
+        if not game_templates:
+            await interaction.response.send_message(f"❌ No templates found for {self.quest_view.game}.", ephemeral=True)
+            return
+        
+        template_view = TemplateSelectView(self.quest_view, game_templates)
+        template_embed = discord.Embed(
+            title=f"📂 Load {self.quest_view.game} Template",
+            description=f"Choose from {len(game_templates)} available template{'s' if len(game_templates) != 1 else ''}:",
+            color=0x0099ff
+        )
+        await interaction.response.send_message(embed=template_embed, view=template_view, ephemeral=True)
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="⚙️")
+    async def manage_templates(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Only administrators can access template management.", ephemeral=True)
+            return
+        
+        manage_view = TemplateManageView(self.quest_view)
+        manage_embed = discord.Embed(
+            title="⚙️ Template Management",
+            description="Manage quest templates for this server:",
+            color=0x0099ff
+        )
+        templates = self.quest_view.get_guild_templates()
+        template_count = len(templates)
+        manage_embed.add_field(
+            name="Server Templates", 
+            value=f"{template_count} template{'s' if template_count != 1 else ''} available", 
+            inline=True
+        )
+        manage_embed.add_field(name="Current Game", value=self.quest_view.game, inline=True)
+        await interaction.response.send_message(embed=manage_embed, view=manage_view, ephemeral=True)
+
 class QuestNameModal(discord.ui.Modal, title="Set Quest Name"):
     def __init__(self, view: QuestMakerView):
         super().__init__()
@@ -752,8 +865,8 @@ class QuestNameModal(discord.ui.Modal, title="Set Quest Name"):
     
     async def on_submit(self, interaction: discord.Interaction):
         self.view.quest_name = self.quest_name.value
-        embed = self.view.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        await self.view.update_original_message()
+        await interaction.response.send_message("✅ Quest name updated.", ephemeral=True)
 
 class QuestDescriptionModal(discord.ui.Modal, title="Set Quest Description"):
     def __init__(self, view: QuestMakerView):
@@ -769,8 +882,8 @@ class QuestDescriptionModal(discord.ui.Modal, title="Set Quest Description"):
     
     async def on_submit(self, interaction: discord.Interaction):
         self.view.quest_description = self.quest_description.value
-        embed = self.view.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        await self.view.update_original_message()
+        await interaction.response.send_message("✅ Quest description updated.", ephemeral=True)
 
 class QuestImageModal(discord.ui.Modal, title="Set Quest Image"):
     def __init__(self, view: QuestMakerView):
@@ -787,8 +900,8 @@ class QuestImageModal(discord.ui.Modal, title="Set Quest Image"):
     
     async def on_submit(self, interaction: discord.Interaction):
         self.view.quest_image = self.quest_image.value
-        embed = self.view.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        await self.view.update_original_message()
+        await interaction.response.send_message("✅ Quest image updated.", ephemeral=True)
 
 class ImageUploadView(discord.ui.View):
     def __init__(self, quest_view: QuestMakerView):
@@ -860,8 +973,8 @@ class QuestScrollModal(discord.ui.Modal, title="Set Quest Scroll Emoji"):
             # Accept whatever they input - Discord will handle validation
             self.view.quest_scroll = emoji_input
         
-        embed = self.view.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        await self.view.update_original_message()
+        await interaction.response.send_message("✅ Quest scroll updated.", ephemeral=True)
 
 class EmojiSelectView(discord.ui.View):
     def __init__(self, quest_view: QuestMakerView):
