@@ -97,6 +97,19 @@ SYSTEM_KEYWORDS: List[Tuple[str, List[str]]] = [
 FEATURE_KEYWORDS = ["feature", "suggest", "suggestion", "request", "add", "could we", "can we", "would like"]
 CRITICAL_KEYWORDS = ["down", "offline", "crash", "crashed", "exploit", "leak", "data loss", "everyone", "all users", "cannot login"]
 VAGUE_REPORTS = {"bug", "broken", "help", "it broke", "not working", "doesnt work", "doesn't work", "fix", "issue"}
+EXPLICIT_EVIDENCE_PREFIXES = {
+    "evidence",
+    "evdence",
+    "evidance",
+    "evidense",
+    "proof",
+    "reproduction",
+    "repro",
+    "confirm",
+    "confirmed",
+    "verification",
+    "verified",
+}
 
 # Common header aliases. The code writes only when the matching header exists.
 HEADER_ALIASES: Dict[str, List[str]] = {
@@ -332,6 +345,40 @@ def _same_meaning(a: str, b: str) -> bool:
     norm_a = re.sub(r"\W+", " ", (a or "").lower()).strip()
     norm_b = re.sub(r"\W+", " ", (b or "").lower()).strip()
     return bool(norm_a and norm_a == norm_b)
+
+
+def _is_near_word(word: str, target: str) -> bool:
+    word = re.sub(r"[^a-z]", "", (word or "").lower())
+    target = re.sub(r"[^a-z]", "", (target or "").lower())
+    if not word or not target:
+        return False
+    if word == target:
+        return True
+    # Tiny Levenshtein distance for common Discord typos like "evdence" / "evidense".
+    prev = list(range(len(target) + 1))
+    for i, c1 in enumerate(word, start=1):
+        cur = [i]
+        for j, c2 in enumerate(target, start=1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (c1 != c2)))
+        prev = cur
+    return prev[-1] <= 2
+
+
+def _starts_with_explicit_evidence_marker(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    first = re.split(r"[\s:;,-]+", cleaned, maxsplit=1)[0].lower()
+    if first in EXPLICIT_EVIDENCE_PREFIXES:
+        return True
+    return _is_near_word(first, "evidence")
+
+
+def _explicit_evidence_guidance(ticket_id: str) -> str:
+    return (
+        f"Oracle review is active for **{ticket_id}**. The Sentinel is no longer auto-logging every admin reply as evidence. "
+        "To add evidence, start the message with **Evidence:**, **Proof:**, **Repro:**, or a close spelling of **Evidence**."
+    )
 
 
 def _extract_reproduction_notes(thread_facts: str) -> List[str]:
@@ -802,6 +849,17 @@ class SentinelBugwatch(commands.Cog):
             return False
         return any(field.name == "Ticket" and str(field.value).strip() == ticket_id for field in candidate.fields)
 
+    def _original_public_embed_matches(self, msg: discord.Message, ticket_id: str) -> bool:
+        if not msg.embeds:
+            return False
+        candidate = msg.embeds[0]
+        if not candidate.fields:
+            return False
+        if any(field.name == "Ticket" and str(field.value).strip() == ticket_id for field in candidate.fields):
+            return True
+        # Older public cards may not have a Ticket field but are still the source public report row/message.
+        return bool((candidate.title or "").startswith(f"✅ Report Submitted to {SENTINEL_NAME}"))
+
     @staticmethod
     def _ids_from_discord_link(link: str) -> Tuple[str, str]:
         match = re.search(r"/channels/\d+/(\d+)/(\d+)", link or "")
@@ -866,6 +924,13 @@ class SentinelBugwatch(commands.Cog):
 
             original_msg = await channel.fetch_message(int(message_id))
             if await edit_ack(original_msg):
+                return
+
+            # If the stored public message is itself a stale Sentinel/public card, update it directly.
+            if self._original_public_embed_matches(original_msg, ticket_id):
+                await original_msg.edit(embed=embed)
+                if "public_ack_message_id" in hmap and not _get_row_value(row, hmap.get("public_ack_message_id")):
+                    await self._update_ticket_row_by_id(ticket_id, {"public_ack_message_id": str(original_msg.id)})
                 return
 
             # First search replies/newer messages after the original report. Then search recent history as a fallback
@@ -1126,6 +1191,20 @@ class SentinelBugwatch(commands.Cog):
 
         await self._submit_intake(message, intake)
 
+    def _requires_explicit_evidence_marker(self, row: List[str], hmap: Dict[str, int]) -> bool:
+        next_step = _get_row_value(row, hmap.get("next_step")).lower()
+        recommendation = _get_row_value(row, hmap.get("recommendation")).lower()
+        status = _get_row_value(row, hmap.get("status")).lower()
+        return "oracle has been mentioned" in next_step or (status == "in review" and "oracle" in recommendation)
+
+    def _has_explicit_evidence_marker(self, message: discord.Message) -> bool:
+        if _starts_with_explicit_evidence_marker(message.content or ""):
+            return True
+        bot_user = getattr(self.bot, "user", None)
+        if bot_user and any(int(getattr(user, "id", 0)) == int(bot_user.id) for user in message.mentions):
+            return True
+        return False
+
     async def _is_oracle_discussion_message(self, message: discord.Message) -> bool:
         """Do not auto-log human replies that are part of Oracle troubleshooting chat.
 
@@ -1168,6 +1247,19 @@ class SentinelBugwatch(commands.Cog):
             return
 
         ticket_id = _get_row_value(row, hmap.get("ticket_id"))
+        if self._requires_explicit_evidence_marker(row, hmap) and not self._has_explicit_evidence_marker(message):
+            try:
+                await message.add_reaction("👁️")
+                await message.add_reaction("🧾")
+            except Exception:
+                pass
+            if not getattr(message, "reference", None):
+                try:
+                    await message.channel.send(_explicit_evidence_guidance(ticket_id), delete_after=18)
+                except Exception:
+                    pass
+            return
+
         note = f"[{_now_iso()}] Evidence/Admin note from {message.author} ({message.author.id}): {text or '[attachment only]'}"
         if attachment_urls:
             note += "\nAttachments:\n" + "\n".join(attachment_urls)
@@ -1419,6 +1511,11 @@ class SentinelBugwatch(commands.Cog):
             thread_id_for_facts = _get_row_value(row, hmap.get("admin_thread_id"))
             thread_facts = await self._collect_thread_facts(thread_id_for_facts)
             current_verification = _infer_verification_from_context(_get_row_value(row, hmap.get("verification")), thread_facts)
+            if current_verification.lower() in {"unverified", "unknown"}:
+                report_type = (_get_row_value(row, hmap.get("type")) or "Bug").lower()
+                has_review_material = bool(raw_evidence.strip() or (attachments and "no attachment" not in attachments.lower()) or "evidence logged" in thread_facts.lower())
+                if report_type != "feature request" and has_review_material:
+                    current_verification = "Confirmed Bug"
             evidence = _evidence_summary(raw_evidence, attachments, thread_facts)
             recommendation = _confirmed_recommendation(affected_system)
             if "verification" in hmap and current_verification.lower() != (_get_row_value(row, hmap.get("verification")) or "").lower():
