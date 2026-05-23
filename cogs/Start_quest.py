@@ -40,7 +40,6 @@ class QuestMakerView(discord.ui.View):
         # Keep the main Quest Maker controls compact. Detailed edit/template
         # actions are exposed through grouped sub-menus below.
         grouped_labels = {
-            "Set Description",
             "Set Image",
             "Set Length",
             "Set Scroll",
@@ -101,7 +100,7 @@ class QuestMakerView(discord.ui.View):
                 print(f"Failed to update original message: {e}")
     
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.secondary, emoji="✏️")
-    async def set_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def edit_details(self, interaction: discord.Interaction, button: discord.ui.Button):
         edit_embed = discord.Embed(
             title="✏️ Edit Quest Details",
             description="Choose which quest detail to update:",
@@ -109,6 +108,10 @@ class QuestMakerView(discord.ui.View):
         )
         await interaction.response.send_message(embed=edit_embed, view=QuestEditDetailsView(self), ephemeral=True)
     
+    @discord.ui.button(label="Set Name", style=discord.ButtonStyle.secondary, emoji="📝")
+    async def set_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(QuestNameModal(self))
+
     @discord.ui.button(label="Set Description", style=discord.ButtonStyle.secondary, emoji="📄")
     async def set_description(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = QuestDescriptionModal(self)
@@ -758,14 +761,6 @@ class QuestEditDetailsView(discord.ui.View):
     def __init__(self, quest_view: QuestMakerView):
         super().__init__(timeout=120)
         self.quest_view = quest_view
-
-    @discord.ui.button(label="Set Name", style=discord.ButtonStyle.secondary, emoji="📝")
-    async def set_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(QuestNameModal(self.quest_view))
-
-    @discord.ui.button(label="Set Description", style=discord.ButtonStyle.secondary, emoji="📄")
-    async def set_description(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(QuestDescriptionModal(self.quest_view))
 
     @discord.ui.button(label="Set Image", style=discord.ButtonStyle.secondary, emoji="🖼️")
     async def set_image(self, interaction: discord.Interaction, button: discord.ui.Button):
