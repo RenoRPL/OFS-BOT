@@ -301,9 +301,38 @@ def _recommendation(report_type: str, affected_system: str, severity: str) -> st
 def _confirmed_recommendation(affected_system: str = "") -> str:
     target = affected_system or "the affected OFS system"
     return (
-        f"Evidence/reproduction has been logged. Prepare an Oracle brief for {target}: summarize gathered facts, "
-        "identify the likely failure path, and propose safe next steps for primary approver review."
+        f"Evidence/reproduction has been logged. Ask The Oracle to reason over {target}, identify the likely failure path, "
+        "and propose safe next steps for primary approver review."
     )
+
+
+def _infer_verification_from_context(current: str, thread_facts: str = "") -> str:
+    current = (current or "").strip()
+    if current and current.lower() not in {"unverified", "unknown"}:
+        return current
+    facts = (thread_facts or "").lower()
+    if "verification: confirmed bug" in facts or "confirmed bug" in facts:
+        return "Confirmed Bug"
+    if any(term in facts for term in ("i verified", "verified the issue", "reproduced", "i can reproduce", "confirmation logged")):
+        return "Confirmed Bug"
+    return current or "Unverified"
+
+
+def _evidence_summary(evidence: str, attachments: str, thread_facts: str) -> str:
+    evidence = (evidence or "").strip()
+    attachments = (attachments or "").strip()
+    thread_facts = (thread_facts or "").strip()
+    parts: List[str] = []
+    if attachments and "no attachment" not in attachments.lower():
+        parts.append("- Reporter provided attachment/screenshot evidence.")
+    facts_l = thread_facts.lower()
+    if "confirmed bug" in facts_l or "confirmation logged" in facts_l or "verified the issue" in facts_l or "reproduced" in facts_l:
+        parts.append("- Authorized admin reproduction/confirmation is present in the ticket thread.")
+    if evidence and "no sheet evidence" not in evidence.lower():
+        parts.append(f"- Sheet evidence/admin notes: {_truncate_field(evidence, 900)}")
+    if thread_facts:
+        parts.append(f"- Thread facts: {_truncate_field(thread_facts, 1500)}")
+    return "\n".join(parts) if parts else "No evidence captured yet. Ask for screenshot, reproduction steps, logs, or admin confirmation."
 
 
 def _ticket_description_for(verification: str, status: str) -> str:
@@ -668,6 +697,61 @@ class SentinelBugwatch(commands.Cog):
         embed.set_footer(text=f"Ticket ID: {record.ticket_id}")
         return embed
 
+    def _build_workspace_embed(
+        self,
+        ticket_id: str,
+        status: str,
+        verification: str,
+        severity: str,
+        recommendation: str,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"🧵 Ticket Workspace — {ticket_id}",
+            description=(
+                "Use this thread for evidence, reproduction notes, Oracle analysis, proposed actions, approvals, "
+                "and final review.\n\n"
+                "Triage admins may add evidence, set severity, or dismiss invalid reports. "
+                f"Only <@{PRIMARY_APPROVER_ID}> may approve repair actions, deployments, restarts, or completion."
+            ),
+            color=_ticket_color(severity, status),
+            timestamp=_now_utc(),
+        )
+        embed.add_field(name="Current Status", value=status or "Unknown", inline=True)
+        embed.add_field(name="Verification", value=verification or "Unverified", inline=True)
+        embed.add_field(name="Severity", value=severity or "Unknown", inline=True)
+        embed.add_field(name="Next Recommended Step", value=_truncate_field(recommendation or "Awaiting triage."), inline=False)
+        return embed
+
+    async def _update_workspace_embed(
+        self,
+        thread_id: str,
+        ticket_id: str,
+        status: str,
+        verification: str,
+        severity: str,
+        recommendation: str,
+    ) -> None:
+        if not str(thread_id or "").isdigit():
+            return
+        thread = self.bot.get_channel(int(thread_id))
+        if thread is None:
+            try:
+                thread = await self.bot.fetch_channel(int(thread_id))
+            except Exception:
+                return
+        if not isinstance(thread, discord.Thread):
+            return
+        try:
+            async for msg in thread.history(limit=20, oldest_first=True):
+                if not msg.author.bot or not msg.embeds:
+                    continue
+                embed = msg.embeds[0]
+                if embed.title and embed.title.startswith(f"🧵 Ticket Workspace — {ticket_id}"):
+                    await msg.edit(embed=self._build_workspace_embed(ticket_id, status, verification, severity, recommendation))
+                    return
+        except Exception as e:
+            print(f"[Sentinel] Failed to update workspace embed for {ticket_id}: {e}")
+
     def _extract_ticket_id_from_interaction(self, interaction: discord.Interaction) -> str:
         msg = interaction.message
         if not msg:
@@ -698,22 +782,7 @@ class SentinelBugwatch(commands.Cog):
             safe_system = re.sub(r"[^A-Za-z0-9 /&_-]+", "", record.affected_system).strip() or "Ticket"
             thread_name = f"{record.ticket_id} — {safe_system}"[:95]
             thread = await admin_msg.create_thread(name=thread_name, auto_archive_duration=10080)
-            starter = discord.Embed(
-                title=f"🧵 Ticket Workspace — {record.ticket_id}",
-                description=(
-                    "Use this thread for evidence, admin notes, Oracle inspection updates, proposed actions, approvals, "
-                    "dismissal/completion notes, and final review.\n\n"
-                    "Whitelisted admins may add evidence, change severity, and dismiss reports. "
-                    f"Only <@{PRIMARY_APPROVER_ID}> may approve fixes/actions or complete reports."
-                ),
-                color=_ticket_color(record.severity, record.status),
-                timestamp=_now_utc(),
-            )
-            starter.add_field(name="Current Status", value=record.status, inline=True)
-            starter.add_field(name="Verification", value=record.verification, inline=True)
-            starter.add_field(name="Severity", value=record.severity, inline=True)
-            starter.add_field(name="Next Recommended Step", value=_truncate_field(record.recommendation), inline=False)
-            await thread.send(embed=starter)
+            await thread.send(embed=self._build_workspace_embed(record.ticket_id, record.status, record.verification, record.severity, record.recommendation))
         except Exception as e:
             print(f"[Sentinel] Failed to create ticket thread for {record.ticket_id}: {e}")
         return admin_msg, thread
@@ -940,6 +1009,9 @@ class SentinelBugwatch(commands.Cog):
         new_verification = "Confirmed Bug" if int(message.author.id) == PRIMARY_APPROVER_ID else "Reproduced"
         if confirmation_detected and "verification" in hmap:
             updates[hmap["verification"]] = new_verification
+        current_status_for_confirmation = _get_row_value(row, hmap.get("status")) or "Submitted"
+        if confirmation_detected and current_status_for_confirmation in {"Submitted", "Needs Verification", "Needs Info", "Triaged"} and "status" in hmap:
+            updates[hmap["status"]] = "In Review"
         if confirmation_detected and "recommendation" in hmap:
             updates[hmap["recommendation"]] = _confirmed_recommendation(_get_row_value(row, hmap.get("affected_system")))
         if confirmation_detected and "next_step" in hmap:
@@ -955,18 +1027,31 @@ class SentinelBugwatch(commands.Cog):
                         admin_msg = await admin_channel.fetch_message(int(admin_msg_id))
                         if admin_msg.embeds:
                             embed = admin_msg.embeds[0]
-                            embed.description = _ticket_description_for(new_verification, _get_row_value(row, hmap.get("status")))
+                            new_status = updates.get(hmap.get("status", -1), _get_row_value(row, hmap.get("status")))
+                            new_recommendation = updates.get(hmap.get("recommendation", -1), _confirmed_recommendation(_get_row_value(row, hmap.get("affected_system"))))
+                            embed.description = _ticket_description_for(new_verification, new_status)
+                            embed.color = _ticket_color(_get_row_value(row, hmap.get("severity")), new_status)
                             for i, field in enumerate(embed.fields):
                                 if field.name == "Verification":
                                     embed.set_field_at(i, name="Verification", value=new_verification, inline=True)
+                                elif field.name == "Status":
+                                    embed.set_field_at(i, name="Status", value=new_status, inline=True)
                                 elif field.name == "Oracle Recommendation":
                                     embed.set_field_at(
                                         i,
                                         name="Oracle Recommendation",
-                                        value=_truncate_field(_confirmed_recommendation(_get_row_value(row, hmap.get("affected_system")))),
+                                        value=_truncate_field(new_recommendation),
                                         inline=False,
                                     )
                             await admin_msg.edit(embed=embed, view=self._ticket_view)
+                            await self._update_workspace_embed(
+                                _get_row_value(row, hmap.get("admin_thread_id")),
+                                ticket_id,
+                                new_status,
+                                new_verification,
+                                _get_row_value(row, hmap.get("severity")) or "Unknown",
+                                new_recommendation,
+                            )
                 except Exception as e:
                     print(f"[Sentinel] Failed to update verification embed for {ticket_id}: {e}")
 
@@ -983,7 +1068,7 @@ class SentinelBugwatch(commands.Cog):
             visible.add_field(
                 name="Next Step",
                 value=(
-                    "Use **Prepare Oracle Brief** on the ticket card to gather facts into an Oracle handoff. "
+                    "Use **Prepare Oracle Brief** on the ticket card to create a Hermes-ready handoff, then mention **The Oracle** in this thread for investigation. "
                     "No patch, deployment, restart, or completion is approved by confirmation alone."
                 ),
                 inline=False,
@@ -1085,6 +1170,7 @@ class SentinelBugwatch(commands.Cog):
         updates: Dict[int, str] = {}
         thread_note_title = ""
         thread_note = ""
+        thread_content: Optional[str] = None
 
         if action == "severity":
             new_value = value.strip().title()
@@ -1139,37 +1225,50 @@ class SentinelBugwatch(commands.Cog):
             if "status" in hmap:
                 updates[hmap["status"]] = "In Review"
             affected_system = _get_row_value(row, hmap.get("affected_system"))
-            current_verification = _get_row_value(row, hmap.get("verification")) or "Unverified"
             current_summary = _get_row_value(row, hmap.get("summary")) or "No summary recorded."
             original_report = _get_row_value(row, hmap.get("original_report")) or current_summary
-            evidence = (
+            raw_evidence = (
                 _get_row_value(row, hmap.get("evidence_log"))
                 or _get_row_value(row, hmap.get("admin_notes"))
                 or _get_row_value(row, hmap.get("clarifying_answers"))
-                or "No sheet evidence logged yet; see thread facts below."
+                or ""
             )
             attachments = _get_row_value(row, hmap.get("attachments")) or "No attachment URLs recorded."
             thread_id_for_facts = _get_row_value(row, hmap.get("admin_thread_id"))
             thread_facts = await self._collect_thread_facts(thread_id_for_facts)
+            current_verification = _infer_verification_from_context(_get_row_value(row, hmap.get("verification")), thread_facts)
+            evidence = _evidence_summary(raw_evidence, attachments, thread_facts)
             recommendation = _confirmed_recommendation(affected_system)
+            if "verification" in hmap and current_verification.lower() != (_get_row_value(row, hmap.get("verification")) or "").lower():
+                updates[hmap["verification"]] = current_verification
             if "recommendation" in hmap:
                 updates[hmap["recommendation"]] = recommendation
             if "next_step" in hmap:
-                updates[hmap["next_step"]] = "Oracle brief prepared. Human may mention The Oracle with this brief for reasoning, inspection, and proposed next steps."
-            thread_note_title = "🧠 Oracle Brief Prepared"
+                updates[hmap["next_step"]] = "Mention The Oracle in the ticket thread with the prepared brief for reasoning, inspection, and proposed next steps."
+            thread_content = "@The Oracle — Oracle handoff prepared below. Please investigate this ticket if you can see this thread."
+            thread_note_title = "🧠 Oracle Handoff Prepared"
             thread_note = (
                 f"Prepared by: {interaction.user.mention}\n"
                 f"Ticket: **{ticket_id}**\n"
                 f"Status: **In Review**\n"
                 f"Verification: **{current_verification}**\n"
                 f"Affected System: **{affected_system or 'Unknown'}**\n\n"
-                f"**Original Report / Claim**\n{_truncate_field(original_report, 800)}\n\n"
-                f"**Current Summary**\n{_truncate_field(current_summary, 700)}\n\n"
-                f"**Evidence / Admin Notes from Sheet**\n{_truncate_field(evidence, 1000)}\n\n"
-                f"**Attachment URLs / Screenshot Evidence**\n{_truncate_field(attachments, 800)}\n\n"
-                f"**Recent Thread Facts**\n{_truncate_field(thread_facts, 1800)}\n\n"
+                "**Hermes / The Oracle Prompt**\n"
+                f"Investigate **{ticket_id}** using the gathered Sentinel facts below. "
+                "Reason over the evidence and propose next steps only. Do **not** edit code, commit, deploy, restart services, close the ticket, or mutate systems unless Oner explicitly approves that next action.\n\n"
+                f"**Original Report / Claim**\n{_truncate_field(original_report, 700)}\n\n"
+                f"**Current Summary**\n{_truncate_field(current_summary, 600)}\n\n"
+                f"**Evidence Summary**\n{_truncate_field(evidence, 1400)}\n\n"
+                f"**Attachment URLs / Screenshot Evidence**\n{_truncate_field(attachments, 700)}\n\n"
+                f"**Recent Thread Facts**\n{_truncate_field(thread_facts, 1500)}\n\n"
                 f"**Recommended Oracle Action**\n{recommendation}\n\n"
-                "**Approval Boundary**\nThis brief authorizes reasoning and proposed next steps only. It does not approve code edits, commits, deployments, service restarts, or ticket completion."
+                "**Requested Oracle Output**\n"
+                "1. Likely affected system/path\n"
+                "2. Most likely cause based on current evidence\n"
+                "3. Evidence quality and remaining unknowns\n"
+                "4. Recommended inspection steps\n"
+                "5. Approval required before any code or deployment action\n\n"
+                "**Approval Boundary**\nThis handoff authorizes reasoning and proposed next steps only."
             )
 
         if "updated_at" in hmap:
@@ -1201,6 +1300,8 @@ class SentinelBugwatch(commands.Cog):
                     embed.set_field_at(i, name="Severity", value=updates.get(hmap.get("severity", -1), old_severity), inline=True)
                 if field.name == "Status" and action in {"status", "dismiss", "oracle_brief"}:
                     embed.set_field_at(i, name="Status", value=updates.get(hmap.get("status", -1), "Dismissed"), inline=True)
+                if field.name == "Verification" and action == "oracle_brief":
+                    embed.set_field_at(i, name="Verification", value=updates.get(hmap.get("verification", -1), _get_row_value(row, hmap.get("verification")) or "Unverified"), inline=True)
                 if field.name == "Oracle Recommendation" and action == "oracle_brief":
                     embed.set_field_at(
                         i,
@@ -1210,7 +1311,7 @@ class SentinelBugwatch(commands.Cog):
                     )
             if action in {"oracle_brief", "status", "dismiss"}:
                 new_status_for_desc = updates.get(hmap.get("status", -1), old_status)
-                new_verification_for_desc = _get_row_value(row, hmap.get("verification"))
+                new_verification_for_desc = updates.get(hmap.get("verification", -1), _get_row_value(row, hmap.get("verification")))
                 embed.description = _ticket_description_for(new_verification_for_desc, new_status_for_desc)
             try:
                 await target_message.edit(embed=embed, view=self._ticket_view)
@@ -1227,8 +1328,13 @@ class SentinelBugwatch(commands.Cog):
                 except Exception:
                     thread = None
             if isinstance(thread, discord.Thread):
+                workspace_status = updates.get(hmap.get("status", -1), old_status or _get_row_value(row, hmap.get("status")) or "Unknown")
+                workspace_verification = updates.get(hmap.get("verification", -1), _get_row_value(row, hmap.get("verification")) or "Unverified")
+                workspace_severity = updates.get(hmap.get("severity", -1), old_severity or _get_row_value(row, hmap.get("severity")) or "Unknown")
+                workspace_recommendation = updates.get(hmap.get("recommendation", -1), _get_row_value(row, hmap.get("recommendation")) or "Awaiting triage.")
+                await self._update_workspace_embed(thread_id, ticket_id, workspace_status, workspace_verification, workspace_severity, workspace_recommendation)
                 note_embed = discord.Embed(title=thread_note_title, description=_truncate_field(thread_note, 4000), color=discord.Color.dark_grey(), timestamp=_now_utc())
-                await thread.send(embed=note_embed)
+                await thread.send(content=thread_content, embed=note_embed)
 
         await interaction.followup.send(f"✅ Sentinel action recorded for **{ticket_id}**.", ephemeral=True)
 
