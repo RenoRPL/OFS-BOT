@@ -298,6 +298,30 @@ def _recommendation(report_type: str, affected_system: str, severity: str) -> st
     return "Verify the reported behavior with reproduction steps, logs, screenshots, or admin confirmation before proposing code changes."
 
 
+def _confirmed_recommendation(affected_system: str = "") -> str:
+    target = affected_system or "the affected OFS system"
+    return (
+        f"Evidence/reproduction has been logged. Prepare an Oracle brief for {target}: summarize gathered facts, "
+        "identify the likely failure path, and propose safe next steps for primary approver review."
+    )
+
+
+def _ticket_description_for(verification: str, status: str) -> str:
+    verification_l = (verification or "").lower()
+    status_l = (status or "").lower()
+    if verification_l in {"confirmed bug", "reproduced"}:
+        return (
+            "Evidence or admin reproduction has been logged for this report. "
+            "The Sentinel is preserving the record for Oracle review; no repair action is approved until explicitly authorized."
+        )
+    if status_l == "dismissed":
+        return "This report has been dismissed by an authorized admin. No code changes were made by The Sentinel."
+    return (
+        "A user-submitted report has entered IT review. "
+        "This is an **unverified claim** until evidence or reproduction confirms it."
+    )
+
+
 def _ticket_color(severity: str, status: str = "") -> discord.Color:
     if status.lower() == "dismissed":
         return discord.Color.dark_grey()
@@ -401,9 +425,9 @@ class SentinelTicketView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Request Oracle Inspection", style=discord.ButtonStyle.success, custom_id="sentinel:request_oracle")
-    async def request_oracle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.handle_ticket_action(interaction, "oracle_inspection", "Requested")
+    @discord.ui.button(label="Prepare Oracle Brief", style=discord.ButtonStyle.success, custom_id="sentinel:request_oracle")
+    async def prepare_oracle_brief(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handle_ticket_action(interaction, "oracle_brief", "Requested")
 
 
 # ---------------------------------------------------------------------------
@@ -621,10 +645,7 @@ class SentinelBugwatch(commands.Cog):
 
     def _build_admin_embed(self, record: TicketRecord) -> discord.Embed:
         title = f"🛡️ {SENTINEL_NAME} Ticket — {record.ticket_id}"
-        desc = (
-            "A user-submitted report has entered IT review. "
-            "This is an **unverified claim** until evidence or reproduction confirms it."
-        )
+        desc = _ticket_description_for(record.verification, record.status)
         embed = discord.Embed(title=title, description=desc, color=_ticket_color(record.severity, record.status), timestamp=_now_utc())
         embed.add_field(name="Type", value=record.report_type, inline=True)
         embed.add_field(name="Status", value=record.status, inline=True)
@@ -919,6 +940,10 @@ class SentinelBugwatch(commands.Cog):
         new_verification = "Confirmed Bug" if int(message.author.id) == PRIMARY_APPROVER_ID else "Reproduced"
         if confirmation_detected and "verification" in hmap:
             updates[hmap["verification"]] = new_verification
+        if confirmation_detected and "recommendation" in hmap:
+            updates[hmap["recommendation"]] = _confirmed_recommendation(_get_row_value(row, hmap.get("affected_system")))
+        if confirmation_detected and "next_step" in hmap:
+            updates[hmap["next_step"]] = "Prepare Oracle brief from the ticket thread and gathered evidence."
         await self._update_cells(ws, row_num, updates)
 
         if confirmation_detected:
@@ -930,10 +955,17 @@ class SentinelBugwatch(commands.Cog):
                         admin_msg = await admin_channel.fetch_message(int(admin_msg_id))
                         if admin_msg.embeds:
                             embed = admin_msg.embeds[0]
+                            embed.description = _ticket_description_for(new_verification, _get_row_value(row, hmap.get("status")))
                             for i, field in enumerate(embed.fields):
                                 if field.name == "Verification":
                                     embed.set_field_at(i, name="Verification", value=new_verification, inline=True)
-                                    break
+                                elif field.name == "Oracle Recommendation":
+                                    embed.set_field_at(
+                                        i,
+                                        name="Oracle Recommendation",
+                                        value=_truncate_field(_confirmed_recommendation(_get_row_value(row, hmap.get("affected_system")))),
+                                        inline=False,
+                                    )
                             await admin_msg.edit(embed=embed, view=self._ticket_view)
                 except Exception as e:
                     print(f"[Sentinel] Failed to update verification embed for {ticket_id}: {e}")
@@ -951,7 +983,7 @@ class SentinelBugwatch(commands.Cog):
             visible.add_field(
                 name="Next Step",
                 value=(
-                    "Use **Request Oracle Inspection** on the ticket card to gather facts into an inspection request. "
+                    "Use **Prepare Oracle Brief** on the ticket card to gather facts into an Oracle handoff. "
                     "No patch, deployment, restart, or completion is approved by confirmation alone."
                 ),
                 inline=False,
@@ -964,6 +996,43 @@ class SentinelBugwatch(commands.Cog):
         except Exception:
             pass
         print(f"[Sentinel] Logged admin evidence for {ticket_id} from {message.author.id}")
+
+    async def _collect_thread_facts(self, thread_id: str, limit: int = 30) -> str:
+        if not thread_id or not str(thread_id).isdigit():
+            return "No ticket thread available."
+        thread = self.bot.get_channel(int(thread_id))
+        if thread is None:
+            try:
+                thread = await self.bot.fetch_channel(int(thread_id))
+            except Exception:
+                thread = None
+        if not isinstance(thread, discord.Thread):
+            return "Ticket thread could not be read."
+
+        facts: List[str] = []
+        try:
+            async for msg in thread.history(limit=limit, oldest_first=True):
+                if msg.author.bot and not msg.embeds:
+                    continue
+                parts: List[str] = []
+                content = _clean_text(msg.content or "", limit=500)
+                if content:
+                    parts.append(content)
+                for embed in msg.embeds:
+                    if embed.title:
+                        parts.append(f"[{embed.title}]")
+                    if embed.description:
+                        parts.append(_clean_text(embed.description, limit=700))
+                    for field in embed.fields[:6]:
+                        parts.append(f"{field.name}: {_clean_text(str(field.value), limit=500)}")
+                if msg.attachments:
+                    parts.append("Attachments: " + ", ".join(a.url for a in msg.attachments))
+                if parts:
+                    author = "Sentinel" if msg.author.bot else str(msg.author)
+                    facts.append(f"- {author}: " + " | ".join(parts))
+        except Exception as e:
+            return f"Thread history could not be collected: {e}"
+        return "\n".join(facts[-12:]) if facts else "No readable ticket thread facts found."
 
     # ----------------------------
     # Button / modal actions
@@ -993,9 +1062,9 @@ class SentinelBugwatch(commands.Cog):
             if not is_primary:
                 await interaction.response.send_message(f"⛔ Only <@{PRIMARY_APPROVER_ID}> may change ticket status.", ephemeral=True)
                 return
-        elif action == "oracle_inspection":
+        elif action == "oracle_brief":
             if not is_primary:
-                await interaction.response.send_message(f"⛔ Only <@{PRIMARY_APPROVER_ID}> may request Oracle inspection.", ephemeral=True)
+                await interaction.response.send_message(f"⛔ Only <@{PRIMARY_APPROVER_ID}> may prepare Oracle briefs.", ephemeral=True)
                 return
         else:
             await interaction.response.send_message("Unknown Sentinel action.", ephemeral=True)
@@ -1066,23 +1135,41 @@ class SentinelBugwatch(commands.Cog):
             thread_note_title = "📌 Status Updated"
             thread_note = f"Updated by: {interaction.user.mention}\nOld Status: **{old_status or 'Unknown'}**\nNew Status: **{new_value}**"
 
-        elif action == "oracle_inspection":
+        elif action == "oracle_brief":
             if "status" in hmap:
                 updates[hmap["status"]] = "In Review"
-            if "next_step" in hmap:
-                updates[hmap["next_step"]] = "Oracle inspection requested by primary approver. Review gathered facts in the ticket thread before proposing action."
-            thread_note_title = "🔍 Oracle Inspection Requested"
-            summary = _get_row_value(row, hmap.get("summary")) or "No summary recorded."
-            evidence = _get_row_value(row, hmap.get("evidence_log")) or _get_row_value(row, hmap.get("admin_notes")) or "No admin evidence logged yet."
+            affected_system = _get_row_value(row, hmap.get("affected_system"))
+            current_verification = _get_row_value(row, hmap.get("verification")) or "Unverified"
+            current_summary = _get_row_value(row, hmap.get("summary")) or "No summary recorded."
+            original_report = _get_row_value(row, hmap.get("original_report")) or current_summary
+            evidence = (
+                _get_row_value(row, hmap.get("evidence_log"))
+                or _get_row_value(row, hmap.get("admin_notes"))
+                or _get_row_value(row, hmap.get("clarifying_answers"))
+                or "No sheet evidence logged yet; see thread facts below."
+            )
             attachments = _get_row_value(row, hmap.get("attachments")) or "No attachment URLs recorded."
+            thread_id_for_facts = _get_row_value(row, hmap.get("admin_thread_id"))
+            thread_facts = await self._collect_thread_facts(thread_id_for_facts)
+            recommendation = _confirmed_recommendation(affected_system)
+            if "recommendation" in hmap:
+                updates[hmap["recommendation"]] = recommendation
+            if "next_step" in hmap:
+                updates[hmap["next_step"]] = "Oracle brief prepared. Human may mention The Oracle with this brief for reasoning, inspection, and proposed next steps."
+            thread_note_title = "🧠 Oracle Brief Prepared"
             thread_note = (
-                f"Requested by: {interaction.user.mention}\n"
-                f"Status: **In Review**\n\n"
-                f"**Gathered Facts**\n"
-                f"Summary: {_truncate_field(summary, 600)}\n\n"
-                f"Evidence: {_truncate_field(evidence, 800)}\n\n"
-                f"Attachments: {_truncate_field(attachments, 500)}\n\n"
-                "The Oracle may now inspect and propose next actions, but no patch, deployment, restart, or completion is approved by this request alone."
+                f"Prepared by: {interaction.user.mention}\n"
+                f"Ticket: **{ticket_id}**\n"
+                f"Status: **In Review**\n"
+                f"Verification: **{current_verification}**\n"
+                f"Affected System: **{affected_system or 'Unknown'}**\n\n"
+                f"**Original Report / Claim**\n{_truncate_field(original_report, 800)}\n\n"
+                f"**Current Summary**\n{_truncate_field(current_summary, 700)}\n\n"
+                f"**Evidence / Admin Notes from Sheet**\n{_truncate_field(evidence, 1000)}\n\n"
+                f"**Attachment URLs / Screenshot Evidence**\n{_truncate_field(attachments, 800)}\n\n"
+                f"**Recent Thread Facts**\n{_truncate_field(thread_facts, 1800)}\n\n"
+                f"**Recommended Oracle Action**\n{recommendation}\n\n"
+                "**Approval Boundary**\nThis brief authorizes reasoning and proposed next steps only. It does not approve code edits, commits, deployments, service restarts, or ticket completion."
             )
 
         if "updated_at" in hmap:
@@ -1112,8 +1199,19 @@ class SentinelBugwatch(commands.Cog):
             for i, field in enumerate(embed.fields):
                 if field.name == "Severity" and action == "severity":
                     embed.set_field_at(i, name="Severity", value=updates.get(hmap.get("severity", -1), old_severity), inline=True)
-                if field.name == "Status" and action in {"status", "dismiss", "oracle_inspection"}:
+                if field.name == "Status" and action in {"status", "dismiss", "oracle_brief"}:
                     embed.set_field_at(i, name="Status", value=updates.get(hmap.get("status", -1), "Dismissed"), inline=True)
+                if field.name == "Oracle Recommendation" and action == "oracle_brief":
+                    embed.set_field_at(
+                        i,
+                        name="Oracle Recommendation",
+                        value=_truncate_field(updates.get(hmap.get("recommendation", -1), _confirmed_recommendation(_get_row_value(row, hmap.get("affected_system"))))),
+                        inline=False,
+                    )
+            if action in {"oracle_brief", "status", "dismiss"}:
+                new_status_for_desc = updates.get(hmap.get("status", -1), old_status)
+                new_verification_for_desc = _get_row_value(row, hmap.get("verification"))
+                embed.description = _ticket_description_for(new_verification_for_desc, new_status_for_desc)
             try:
                 await target_message.edit(embed=embed, view=self._ticket_view)
             except Exception as e:
@@ -1129,7 +1227,7 @@ class SentinelBugwatch(commands.Cog):
                 except Exception:
                     thread = None
             if isinstance(thread, discord.Thread):
-                note_embed = discord.Embed(title=thread_note_title, description=thread_note, color=discord.Color.dark_grey(), timestamp=_now_utc())
+                note_embed = discord.Embed(title=thread_note_title, description=_truncate_field(thread_note, 4000), color=discord.Color.dark_grey(), timestamp=_now_utc())
                 await thread.send(embed=note_embed)
 
         await interaction.followup.send(f"✅ Sentinel action recorded for **{ticket_id}**.", ephemeral=True)
