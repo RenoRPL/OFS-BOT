@@ -39,6 +39,9 @@ SENTINEL_NAME = "The Sentinel"
 BUG_REPORTS_CHANNEL_ID = 1507803277348311201
 ADMIN_REPORT_CHANNEL_ID = 1507805812901417171
 PRIMARY_APPROVER_ID = 527694877773922324
+# Prefer the Oracle bot/user ID for reliable Hermes gateway routing. The role is a fallback only.
+ORACLE_BOT_USER_ID = int(os.getenv("ORACLE_BOT_USER_ID", "0") or "0")
+ORACLE_ROLE_ID = 1507463985543512215
 SPREADSHEET_ID = "1YW5A_gk5WwmKbwxqrhIut3JUBSjaTO8vEf09F5QjpLo"
 BUG_REPORTS_TAB = "Bug Reports"
 WHITELIST_ADMIN_TAB = "White list Admin"
@@ -318,20 +321,47 @@ def _infer_verification_from_context(current: str, thread_facts: str = "") -> st
     return current or "Unverified"
 
 
+def _oracle_mention() -> str:
+    if ORACLE_BOT_USER_ID:
+        return f"<@{ORACLE_BOT_USER_ID}>"
+    return f"<@&{ORACLE_ROLE_ID}>"
+
+
+def _same_meaning(a: str, b: str) -> bool:
+    norm_a = re.sub(r"\W+", " ", (a or "").lower()).strip()
+    norm_b = re.sub(r"\W+", " ", (b or "").lower()).strip()
+    return bool(norm_a and norm_a == norm_b)
+
+
+def _extract_reproduction_notes(thread_facts: str) -> List[str]:
+    notes: List[str] = []
+    for line in (thread_facts or "").splitlines():
+        clean = _clean_text(line.lstrip("- "), limit=450)
+        lower = clean.lower()
+        if not clean or clean.startswith("Sentinel:"):
+            continue
+        if any(term in lower for term in ("verified", "reproduced", "i tested", "i can reproduce", "format", "paragraph", "banner", "codex", "styled")):
+            if clean not in notes:
+                notes.append(clean)
+        if len(notes) >= 3:
+            break
+    return notes
+
+
 def _evidence_summary(evidence: str, attachments: str, thread_facts: str) -> str:
     evidence = (evidence or "").strip()
     attachments = (attachments or "").strip()
     thread_facts = (thread_facts or "").strip()
     parts: List[str] = []
     if attachments and "no attachment" not in attachments.lower():
-        parts.append("- Reporter provided attachment/screenshot evidence.")
+        parts.append("- Screenshot/attachment evidence was provided by the reporter.")
     facts_l = thread_facts.lower()
     if "confirmed bug" in facts_l or "confirmation logged" in facts_l or "verified the issue" in facts_l or "reproduced" in facts_l:
         parts.append("- Authorized admin reproduction/confirmation is present in the ticket thread.")
+    for note in _extract_reproduction_notes(thread_facts):
+        parts.append(f"- Reproduction note: {note}")
     if evidence and "no sheet evidence" not in evidence.lower():
-        parts.append(f"- Sheet evidence/admin notes: {_truncate_field(evidence, 900)}")
-    if thread_facts:
-        parts.append(f"- Thread facts: {_truncate_field(thread_facts, 1500)}")
+        parts.append(f"- Sheet evidence/admin notes: {_truncate_field(evidence, 700)}")
     return "\n".join(parts) if parts else "No evidence captured yet. Ask for screenshot, reproduction steps, logs, or admin confirmation."
 
 
@@ -1244,31 +1274,28 @@ class SentinelBugwatch(commands.Cog):
             if "recommendation" in hmap:
                 updates[hmap["recommendation"]] = recommendation
             if "next_step" in hmap:
-                updates[hmap["next_step"]] = "Mention The Oracle in the ticket thread with the prepared brief for reasoning, inspection, and proposed next steps."
-            thread_content = "@The Oracle — Oracle handoff prepared below. Please investigate this ticket if you can see this thread."
-            thread_note_title = "🧠 Oracle Handoff Prepared"
+                updates[hmap["next_step"]] = "The Oracle has been mentioned in-thread with a concise investigation request. Await Oracle reasoning or gateway response."
+            report_section = f"**Reporter Claim**\n{_truncate_field(original_report, 800)}\n\n"
+            if not _same_meaning(original_report, current_summary):
+                report_section += f"**Current Summary**\n{_truncate_field(current_summary, 600)}\n\n"
+            oracle_mention = _oracle_mention()
+            thread_content = f"{oracle_mention} Oracle investigation requested for **{ticket_id}**. Reason over the evidence below and propose next steps only."
+            thread_note_title = f"🧠 Oracle Investigation Request — {ticket_id}"
             thread_note = (
                 f"Prepared by: {interaction.user.mention}\n"
-                f"Ticket: **{ticket_id}**\n"
-                f"Status: **In Review**\n"
-                f"Verification: **{current_verification}**\n"
-                f"Affected System: **{affected_system or 'Unknown'}**\n\n"
-                "**Hermes / The Oracle Prompt**\n"
-                f"Investigate **{ticket_id}** using the gathered Sentinel facts below. "
-                "Reason over the evidence and propose next steps only. Do **not** edit code, commit, deploy, restart services, close the ticket, or mutate systems unless Oner explicitly approves that next action.\n\n"
-                f"**Original Report / Claim**\n{_truncate_field(original_report, 700)}\n\n"
-                f"**Current Summary**\n{_truncate_field(current_summary, 600)}\n\n"
-                f"**Evidence Summary**\n{_truncate_field(evidence, 1400)}\n\n"
-                f"**Attachment URLs / Screenshot Evidence**\n{_truncate_field(attachments, 700)}\n\n"
-                f"**Recent Thread Facts**\n{_truncate_field(thread_facts, 1500)}\n\n"
-                f"**Recommended Oracle Action**\n{recommendation}\n\n"
-                "**Requested Oracle Output**\n"
-                "1. Likely affected system/path\n"
-                "2. Most likely cause based on current evidence\n"
-                "3. Evidence quality and remaining unknowns\n"
-                "4. Recommended inspection steps\n"
-                "5. Approval required before any code or deployment action\n\n"
-                "**Approval Boundary**\nThis handoff authorizes reasoning and proposed next steps only."
+                f"Status: **In Review** | Verification: **{current_verification}** | System: **{affected_system or 'Unknown'}**\n\n"
+                f"{report_section}"
+                f"**Evidence & Reproduction**\n{_truncate_field(evidence, 1700)}\n\n"
+                f"**Attachment / Screenshot Evidence**\n{_truncate_field(attachments, 600)}\n\n"
+                "**Oracle Task**\n"
+                "Investigate this Sentinel ticket from the facts above. Return:\n"
+                "1. likely affected system/file/path\n"
+                "2. most likely cause based on current evidence\n"
+                "3. evidence quality and remaining unknowns\n"
+                "4. recommended inspection steps\n"
+                "5. what approval is required before any code or deployment action\n\n"
+                f"**Recommended Direction**\n{recommendation}\n\n"
+                "**Boundary**\nReasoning only. No code edits, commits, deployments, restarts, ticket closure, role changes, message deletions, or non-intake Sheet mutations without Oner approval."
             )
 
         if "updated_at" in hmap:
@@ -1334,7 +1361,11 @@ class SentinelBugwatch(commands.Cog):
                 workspace_recommendation = updates.get(hmap.get("recommendation", -1), _get_row_value(row, hmap.get("recommendation")) or "Awaiting triage.")
                 await self._update_workspace_embed(thread_id, ticket_id, workspace_status, workspace_verification, workspace_severity, workspace_recommendation)
                 note_embed = discord.Embed(title=thread_note_title, description=_truncate_field(thread_note, 4000), color=discord.Color.dark_grey(), timestamp=_now_utc())
-                await thread.send(content=thread_content, embed=note_embed)
+                await thread.send(
+                    content=thread_content,
+                    embed=note_embed,
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
+                )
 
         await interaction.followup.send(f"✅ Sentinel action recorded for **{ticket_id}**.", ephemeral=True)
 
