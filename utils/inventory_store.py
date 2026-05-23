@@ -618,6 +618,9 @@ async def commit_trade(
     ps = max(0, int(price_silver))
     pc = max(0, int(price_copper))
 
+    if seller_id == buyer_id:
+        return False, "You cannot trade with yourself."
+
     first, second = (seller_id, buyer_id) if seller_id < buyer_id else (buyer_id, seller_id)
 
     async with _lock_for_user(first):
@@ -650,9 +653,35 @@ async def commit_trade(
             await update_bank_wallet(buyer_id, buyer_new)
             await update_bank_wallet(seller_id, seller_new)
 
-            # Transfer item qty seller -> buyer
-            await remove_item(seller_id, item_id, qty, source="trade_out", meta={"trade_id": trade_id, **(meta or {})})
-            await add_item(buyer_id, item_id, qty, source="trade_in", meta={"trade_id": trade_id, **(meta or {})})
+            # Transfer item qty seller -> buyer.
+            # Do this directly while the seller/buyer locks are already held.
+            # Calling remove_item()/add_item() here would try to acquire these
+            # same asyncio locks again, which deadlocks because they are not
+            # re-entrant.
+            trade_meta = {"trade_id": trade_id, **(meta or {})}
+            item_snapshot = {
+                "item_id": item_id,
+                "name": seller_item.name,
+                "category": seller_item.category,
+                "description": seller_item.description,
+                "role_to_assign": seller_item.role_to_assign,
+            }
+            await asyncio.to_thread(
+                _upsert_inventory_row_sync,
+                seller_id,
+                item_snapshot,
+                -qty,
+                "trade_out",
+                trade_meta,
+            )
+            await asyncio.to_thread(
+                _upsert_inventory_row_sync,
+                buyer_id,
+                item_snapshot,
+                qty,
+                "trade_in",
+                trade_meta,
+            )
 
             # Log (best-effort)
             try:
