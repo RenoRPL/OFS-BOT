@@ -794,6 +794,19 @@ class SentinelBugwatch(commands.Cog):
         embed.add_field(name="Important", value=important, inline=False)
         return embed
 
+    def _public_ack_matches(self, msg: discord.Message, ticket_id: str) -> bool:
+        if not getattr(msg.author, "bot", False) or not msg.embeds:
+            return False
+        candidate = msg.embeds[0]
+        if not (candidate.title or "").startswith(f"✅ Report Submitted to {SENTINEL_NAME}"):
+            return False
+        return any(field.name == "Ticket" and str(field.value).strip() == ticket_id for field in candidate.fields)
+
+    @staticmethod
+    def _ids_from_discord_link(link: str) -> Tuple[str, str]:
+        match = re.search(r"/channels/\d+/(\d+)/(\d+)", link or "")
+        return (match.group(1), match.group(2)) if match else ("", "")
+
     async def _update_public_status_embed(
         self,
         ticket_id: str,
@@ -805,6 +818,11 @@ class SentinelBugwatch(commands.Cog):
         channel_id = _get_row_value(row, hmap.get("public_channel_id"))
         message_id = _get_row_value(row, hmap.get("public_message_id"))
         if not channel_id.isdigit() or not message_id.isdigit():
+            link_channel_id, link_message_id = self._ids_from_discord_link(_get_row_value(row, hmap.get("public_message_link")))
+            channel_id = channel_id if channel_id.isdigit() else link_channel_id
+            message_id = message_id if message_id.isdigit() else link_message_id
+        if not channel_id.isdigit() or not message_id.isdigit():
+            print(f"[Sentinel] Public status update skipped for {ticket_id}: missing public channel/message id")
             return
 
         def val(key: str, fallback: str = "") -> str:
@@ -822,6 +840,14 @@ class SentinelBugwatch(commands.Cog):
             affected_system=val("affected_system", "Unknown"),
         )
 
+        async def edit_ack(msg: discord.Message) -> bool:
+            if not self._public_ack_matches(msg, ticket_id):
+                return False
+            await msg.edit(embed=embed)
+            if "public_ack_message_id" in hmap and not _get_row_value(row, hmap.get("public_ack_message_id")):
+                await self._update_ticket_row_by_id(ticket_id, {"public_ack_message_id": str(msg.id)})
+            return True
+
         try:
             channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
             if not hasattr(channel, "fetch_message") or not hasattr(channel, "history"):
@@ -833,23 +859,23 @@ class SentinelBugwatch(commands.Cog):
             if ack_id.isdigit():
                 try:
                     ack_msg = await channel.fetch_message(int(ack_id))
-                    if ack_msg.embeds:
-                        await ack_msg.edit(embed=embed)
+                    if await edit_ack(ack_msg):
                         return
                 except Exception as e:
                     print(f"[Sentinel] Public ack fetch failed for {ticket_id} ({ack_id}); falling back to search: {e}")
 
             original_msg = await channel.fetch_message(int(message_id))
-            async for msg in channel.history(limit=100, after=original_msg, oldest_first=True):
-                if not getattr(msg.author, "bot", False) or not msg.embeds:
-                    continue
-                candidate = msg.embeds[0]
-                if not (candidate.title or "").startswith(f"✅ Report Submitted to {SENTINEL_NAME}"):
-                    continue
-                for field in candidate.fields:
-                    if field.name == "Ticket" and str(field.value).strip() == ticket_id:
-                        await msg.edit(embed=embed)
-                        return
+            if await edit_ack(original_msg):
+                return
+
+            # First search replies/newer messages after the original report. Then search recent history as a fallback
+            # for older tickets where the ack ID was not persisted or Discord reply ordering differs.
+            async for msg in channel.history(limit=300, after=original_msg, oldest_first=True):
+                if await edit_ack(msg):
+                    return
+            async for msg in channel.history(limit=300):
+                if await edit_ack(msg):
+                    return
             print(f"[Sentinel] Public acknowledgement message not found for {ticket_id} near public report {message_id}")
         except Exception as e:
             print(f"[Sentinel] Failed to update public status embed for {ticket_id}: {e}")
@@ -1100,9 +1126,37 @@ class SentinelBugwatch(commands.Cog):
 
         await self._submit_intake(message, intake)
 
+    async def _is_oracle_discussion_message(self, message: discord.Message) -> bool:
+        """Do not auto-log human replies that are part of Oracle troubleshooting chat.
+
+        Admin ticket threads are the workbench. Human messages that reply to The Oracle or
+        mention The Oracle should wake/continue Hermes, not be reclassified as evidence.
+        """
+        if ORACLE_BOT_USER_ID and any(int(getattr(user, "id", 0)) == ORACLE_BOT_USER_ID for user in message.mentions):
+            return True
+        reference = getattr(message, "reference", None)
+        if not reference or not getattr(reference, "message_id", None):
+            return False
+        target = getattr(reference, "resolved", None)
+        if target is None:
+            try:
+                target = await message.channel.fetch_message(reference.message_id)
+            except Exception:
+                target = None
+        author = getattr(target, "author", None)
+        if author and ORACLE_BOT_USER_ID and int(getattr(author, "id", 0)) == ORACLE_BOT_USER_ID:
+            return True
+        return False
+
     async def _handle_admin_thread_message(self, message: discord.Message) -> None:
         # Thread messages become evidence only for whitelisted admins / primary approver.
         if not await self._is_whitelisted_admin(message.author.id):
+            return
+        if await self._is_oracle_discussion_message(message):
+            try:
+                await message.add_reaction("👁️")
+            except Exception:
+                pass
             return
         text = _clean_text(message.content or "")
         attachment_urls = [a.url for a in message.attachments]
