@@ -45,7 +45,7 @@ discord_logger.setLevel(logging.INFO)
 # Intents
 intents = discord.Intents.default()
 intents.members = True  # Requires "Server Members Intent" enabled in Dev Portal
-# intents.message_content = True  # Enable only if you actually read message content
+intents.message_content = True  # Required for The Sentinel to read Bug reports channel messages
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
