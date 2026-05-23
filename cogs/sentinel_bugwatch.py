@@ -126,6 +126,9 @@ COMPLETION_PHRASES = (
     "issue resolved",
     "finish this",
 )
+TERMINAL_STATUSES = {"completed", "dismissed", "duplicate"}
+OPEN_THREAD_EMOJI = "⬜"
+CLOSED_THREAD_EMOJI = "✅"
 
 # Common header aliases. The code writes only when the matching header exists.
 HEADER_ALIASES: Dict[str, List[str]] = {
@@ -408,6 +411,16 @@ def _is_completion_intent(text: str) -> bool:
         or re.search(r"\b(close|finish)\b.{0,80}\b(ticket|report|bug)\b", lowered)
         or re.search(r"\b(bug|issue|report|fix)\b.{0,80}\b(fixed|resolved|complete|completed)\b", lowered)
     )
+
+
+def _thread_status_emoji(status: str) -> str:
+    return CLOSED_THREAD_EMOJI if (status or "").lower() in TERMINAL_STATUSES else OPEN_THREAD_EMOJI
+
+
+def _ticket_thread_name(ticket_id: str, affected_system: str, status: str) -> str:
+    safe_system = re.sub(r"[^A-Za-z0-9 /&_-]+", "", affected_system or "").strip() or "Ticket"
+    base = re.sub(rf"^\s*(?:{re.escape(OPEN_THREAD_EMOJI)}|{re.escape(CLOSED_THREAD_EMOJI)})\s*", "", f"{ticket_id} — {safe_system}").strip()
+    return f"{_thread_status_emoji(status)} {base}"[:95]
 
 
 def _extract_reproduction_notes(thread_facts: str) -> List[str]:
@@ -1030,6 +1043,25 @@ class SentinelBugwatch(commands.Cog):
         except Exception as e:
             print(f"[Sentinel] Failed to update workspace embed for {ticket_id}: {e}")
 
+    async def _rename_ticket_thread(self, thread_id: str, ticket_id: str, affected_system: str, status: str) -> None:
+        if not str(thread_id or "").isdigit():
+            return
+        thread = self.bot.get_channel(int(thread_id))
+        if thread is None:
+            try:
+                thread = await self.bot.fetch_channel(int(thread_id))
+            except Exception:
+                return
+        if not isinstance(thread, discord.Thread):
+            return
+        desired_name = _ticket_thread_name(ticket_id, affected_system, status)
+        if thread.name == desired_name:
+            return
+        try:
+            await thread.edit(name=desired_name, reason=f"Sentinel ticket status changed to {status}")
+        except Exception as e:
+            print(f"[Sentinel] Failed to rename ticket thread for {ticket_id}: {e}")
+
     def _extract_ticket_id_from_interaction(self, interaction: discord.Interaction) -> str:
         msg = interaction.message
         if not msg:
@@ -1057,8 +1089,7 @@ class SentinelBugwatch(commands.Cog):
 
         thread = None
         try:
-            safe_system = re.sub(r"[^A-Za-z0-9 /&_-]+", "", record.affected_system).strip() or "Ticket"
-            thread_name = f"{record.ticket_id} — {safe_system}"[:95]
+            thread_name = _ticket_thread_name(record.ticket_id, record.affected_system, record.status)
             thread = await admin_msg.create_thread(name=thread_name, auto_archive_duration=10080)
             await thread.send(embed=self._build_workspace_embed(record.ticket_id, record.status, record.verification, record.severity, record.recommendation))
         except Exception as e:
@@ -1326,6 +1357,8 @@ class SentinelBugwatch(commands.Cog):
                 print(f"[Sentinel] Failed to update completed admin embed for {ticket_id}: {e}")
 
         thread_id = _get_row_value(row, hmap.get("admin_thread_id")) or str(getattr(message.channel, "id", ""))
+        affected_system = _get_row_value(row, hmap.get("affected_system")) or "Ticket"
+        await self._rename_ticket_thread(thread_id, ticket_id, affected_system, "Completed")
         await self._update_workspace_embed(thread_id, ticket_id, "Completed", verification, severity, recommendation)
 
         complete_embed = discord.Embed(
@@ -1756,6 +1789,7 @@ class SentinelBugwatch(commands.Cog):
                 workspace_verification = updates.get(hmap.get("verification", -1), _get_row_value(row, hmap.get("verification")) or "Unverified")
                 workspace_severity = updates.get(hmap.get("severity", -1), old_severity or _get_row_value(row, hmap.get("severity")) or "Unknown")
                 workspace_recommendation = updates.get(hmap.get("recommendation", -1), _get_row_value(row, hmap.get("recommendation")) or "Awaiting triage.")
+                await self._rename_ticket_thread(thread_id, ticket_id, _get_row_value(row, hmap.get("affected_system")) or "Ticket", workspace_status)
                 await self._update_workspace_embed(thread_id, ticket_id, workspace_status, workspace_verification, workspace_severity, workspace_recommendation)
                 note_embed = discord.Embed(title=thread_note_title, description=_truncate_field(thread_note, 4000), color=discord.Color.dark_grey(), timestamp=_now_utc())
                 await thread.send(
