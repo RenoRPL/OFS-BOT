@@ -430,8 +430,9 @@ def _starts_with_explicit_evidence_marker(text: str) -> bool:
 
 def _explicit_evidence_guidance(ticket_id: str) -> str:
     return (
-        f"Oracle review is active for **{ticket_id}**. The Sentinel is no longer auto-logging every admin reply as evidence. "
-        "To add evidence, start the message with **Evidence:**, **Proof:**, **Repro:**, or a close spelling of **Evidence**."
+        f"The Sentinel did not log that as evidence for **{ticket_id}**. "
+        "Ticket-thread conversation, Oracle instructions, and operational notes are ignored unless evidence intent is explicit. "
+        "To log evidence, start with **Evidence:**, **Proof:**, **Repro:**, **Confirmed:**, or **Verified:**, or mention The Sentinel directly."
     )
 
 
@@ -1727,13 +1728,16 @@ class SentinelBugwatch(commands.Cog):
             except Exception:
                 pass
             return
-        if self._requires_explicit_evidence_marker(row, hmap) and not self._has_explicit_evidence_marker(message):
+        if not self._has_explicit_evidence_marker(message):
             try:
                 await message.add_reaction("👁️")
                 await message.add_reaction("🧾")
             except Exception:
                 pass
-            if not getattr(message, "reference", None):
+            # Prompt only on plain text chatter. Attachment-only messages may be screenshots;
+            # the reactions show the Sentinel saw them, but explicit wording is still required
+            # before writing anything into the evidence log.
+            if text and not getattr(message, "reference", None):
                 try:
                     await message.channel.send(_explicit_evidence_guidance(ticket_id), delete_after=18)
                 except Exception:
