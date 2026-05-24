@@ -33,11 +33,30 @@ from utils.google_auth import open_worksheet_async
 print("=== LOADED sentinel_bugwatch.py (The Sentinel Bugwatch MVP) ===")
 
 # ---------------------------------------------------------------------------
-# Fixed OFS Sentinel configuration
+# OFS Sentinel configuration
 # ---------------------------------------------------------------------------
 SENTINEL_NAME = "The Sentinel"
-BUG_REPORTS_CHANNEL_ID = 1507803277348311201
-ADMIN_REPORT_CHANNEL_ID = 1507805812901417171
+TEST_BUG_REPORTS_CHANNEL_ID = 1507803277348311201
+MAIN_BUG_REPORTS_CHANNEL_ID = 1470584259986198745
+TEST_ADMIN_REPORT_CHANNEL_ID = 1507805812901417171
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[Sentinel] Invalid {name}={raw!r}; using {default}")
+        return default
+
+
+# Default staged cutover: monitor the main community Bug Report channel while
+# keeping admin ticket workbench threads in the test/admin Oracle report channel.
+# Override these env vars to switch back without a code change.
+BUG_REPORTS_CHANNEL_ID = _env_int("SENTINEL_BUG_REPORTS_CHANNEL_ID", MAIN_BUG_REPORTS_CHANNEL_ID)
+ADMIN_REPORT_CHANNEL_ID = _env_int("SENTINEL_ADMIN_REPORT_CHANNEL_ID", TEST_ADMIN_REPORT_CHANNEL_ID)
 PRIMARY_APPROVER_ID = 527694877773922324
 # Prefer the Oracle bot/user ID for reliable Hermes gateway routing. The role is a fallback only.
 ORACLE_BOT_USER_ID = int(os.getenv("ORACLE_BOT_USER_ID", "1507459854825033838") or "1507459854825033838")
@@ -45,6 +64,8 @@ ORACLE_ROLE_ID = 1507463985543512215
 SPREADSHEET_ID = "1YW5A_gk5WwmKbwxqrhIut3JUBSjaTO8vEf09F5QjpLo"
 BUG_REPORTS_TAB = "Bug Reports"
 WHITELIST_ADMIN_TAB = "White list Admin"
+print(f"[Sentinel] Bug report intake channel: {BUG_REPORTS_CHANNEL_ID}")
+print(f"[Sentinel] Admin report/workbench channel: {ADMIN_REPORT_CHANNEL_ID}")
 
 # Intake / spam protection
 INTAKE_TTL_SECONDS = 30 * 60
