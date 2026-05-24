@@ -116,7 +116,40 @@ SYSTEM_KEYWORDS: List[Tuple[str, List[str]]] = [
     ("Lore / Content", ["lore", "content", "typo", "canon", "archive"]),
 ]
 
-FEATURE_KEYWORDS = ["feature", "suggest", "suggestion", "request", "add", "could we", "can we", "would like"]
+FEATURE_KEYWORDS = ["feature", "suggest", "suggestion", "feature request", "could we", "can we", "would like", "please add", "can you add", "new feature"]
+BUG_INDICATOR_KEYWORDS = [
+    "bug",
+    "broken",
+    "not working",
+    "doesnt work",
+    "doesn't work",
+    "didnt",
+    "didn't",
+    "did not",
+    "doesnt",
+    "doesn't",
+    "does not",
+    "dont",
+    "don't",
+    "failed",
+    "error",
+    "wrong",
+    "missing",
+    "stuck",
+    "cannot",
+    "can't",
+    "wont",
+    "won't",
+    "not showing",
+    "not show",
+    "not add",
+    "didnt add",
+    "didn't add",
+    "did not add",
+    "didnt get",
+    "didn't get",
+    "did not get",
+]
 CRITICAL_KEYWORDS = ["down", "offline", "crash", "crashed", "exploit", "leak", "data loss", "everyone", "all users", "cannot login"]
 VAGUE_REPORTS = {"bug", "broken", "help", "it broke", "not working", "doesnt work", "doesn't work", "fix", "issue"}
 EXPLICIT_EVIDENCE_PREFIXES = {
@@ -332,8 +365,20 @@ def _has_meaningful_content(text: str, attachments: List[str]) -> bool:
 
 
 def _is_feature_request(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(k in lowered for k in FEATURE_KEYWORDS)
+    lowered = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if not lowered:
+        return False
+
+    # Defect language wins over generic words like "add" or "request".
+    # Example: "my quest points didn't add" is a bug, not a feature request.
+    if any(k in lowered for k in BUG_INDICATOR_KEYWORDS):
+        return False
+
+    # Treat as feature only when the user clearly asks for new capability or change,
+    # not merely because the report contains a broad word such as "add".
+    if any(k in lowered for k in FEATURE_KEYWORDS):
+        return True
+    return bool(re.search(r"\b(request|asking)\b.*\b(new|feature|option|ability|command|button)\b", lowered))
 
 
 def _classify_system(text: str) -> str:
