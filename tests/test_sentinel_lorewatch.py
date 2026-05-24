@@ -12,6 +12,8 @@ from cogs.sentinel_lorewatch import (
     _header_map,
     _is_probably_substantial_lore,
     _lore_fingerprint,
+    _oracle_handoff_message,
+    _oracle_mention,
     _parse_backfill_since,
 )
 
@@ -99,6 +101,36 @@ def test_default_april_backfill_start_uses_current_year():
     assert default_start.hour == 0
     assert default_start.minute == 0
     assert default_start.tzinfo == timezone.utc
+
+
+def test_oracle_handoff_message_mentions_oracle_and_includes_plain_text_lore():
+    message = SimpleNamespace(
+        id=999,
+        guild=SimpleNamespace(id=111),
+        channel=SimpleNamespace(id=222),
+        author=SimpleNamespace(id=333, __str__=lambda self: "Lorekeeper"),
+    )
+    lore_text = "The banners crossed the void and recorded a new Chronicle for the Fallen Star."
+    attachment_urls = ["https://cdn.discordapp.com/lore.png"]
+
+    handoff = _oracle_handoff_message(
+        "LORE-20260524-009",
+        message,
+        "Chronicles / Timeline",
+        "Place in the April campaign sequence.",
+        lore_text,
+        attachment_urls,
+    )
+
+    assert handoff.startswith(_oracle_mention())
+    assert "ORACLE LORE REVIEW REQUEST" in handoff
+    assert "LORE-20260524-009" in handoff
+    assert "https://discord.com/channels/111/222/999" in handoff
+    assert "Chronicles / Timeline" in handoff
+    assert "Place in the April campaign sequence." in handoff
+    assert lore_text in handoff
+    assert attachment_urls[0] in handoff
+    assert "Canon Conflicts / Duplicate Risk" in handoff
 
 
 def test_lore_backfill_authority_is_primary_approver_only(monkeypatch):

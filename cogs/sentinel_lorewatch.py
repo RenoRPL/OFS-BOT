@@ -143,6 +143,48 @@ def _oracle_mention() -> str:
     return f"<@{ORACLE_BOT_USER_ID}>"
 
 
+def _oracle_handoff_message(
+    lore_id: str,
+    message: discord.Message,
+    area: str,
+    placement: str,
+    text: str,
+    attachment_urls: List[str],
+    *,
+    limit: int = 1900,
+) -> str:
+    """Build a plain-text Oracle handoff so Hermes can read more than embeds."""
+    attachments = "\n".join(attachment_urls) if attachment_urls else "None"
+    lore_text = text or "[No text supplied; review attachment(s) and source post.]"
+    handoff = (
+        f"{_oracle_mention()}\n\n"
+        "ORACLE LORE REVIEW REQUEST\n"
+        f"Lore ID: {lore_id}\n"
+        f"Source: {_message_link(message)}\n"
+        f"Author: {message.author} (`{message.author.id}`)\n\n"
+        "Initial Classification:\n"
+        f"{area}\n\n"
+        "Placement Hint:\n"
+        f"{placement}\n\n"
+        "Original Lore:\n"
+        f"{lore_text}\n\n"
+        "Attachments:\n"
+        f"{attachments}\n\n"
+        "Required Output:\n"
+        "- Canon Classification\n"
+        "- Suggested Site Target\n"
+        "- Suggested Timeline Placement\n"
+        "- Suggested Codex Placement\n"
+        "- Chronicle Summary\n"
+        "- Site-Ready Draft\n"
+        "- Image Use\n"
+        "- Canon Conflicts / Duplicate Risk\n"
+        "- Approval Needed\n\n"
+        "Boundary: do not publish or mutate site content without explicit human approval."
+    )
+    return handoff if len(handoff) <= limit else handoff[: limit - 3] + "..."
+
+
 def _infer_suggested_area(text: str, attachment_urls: List[str]) -> Tuple[str, str]:
     lowered = (text or "").lower()
     if any(k in lowered for k in ("battle", "war", "campaign", "crusade", "operation", "victory", "defeat", "fleet")):
@@ -306,6 +348,10 @@ class SentinelLorewatch(commands.Cog):
         thread = None
         try:
             thread = await admin_msg.create_thread(name=f"⬜ {lore_id} — Lore Review", auto_archive_duration=10080)
+            await thread.send(
+                content=_oracle_handoff_message(lore_id, message, area, placement, text, attachment_urls),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
             await thread.send(embed=self._build_workspace_embed(lore_id, area, placement))
         except Exception as e:
             print(f"[Lorewatch] Failed to create lore thread for {lore_id}: {e}")
