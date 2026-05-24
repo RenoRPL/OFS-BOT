@@ -72,6 +72,7 @@ INTAKE_TTL_SECONDS = 30 * 60
 NEW_INTAKE_COOLDOWN_SECONDS = 120
 MAX_MESSAGE_CHARS = 3500
 WHITELIST_CACHE_TTL_SECONDS = 120
+SHEET_SYNC_INTERVAL_SECONDS = _env_int("SENTINEL_SHEET_SYNC_INTERVAL_SECONDS", 90)
 
 # Ticket UI / field values
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Unknown", "Feature Request"]
@@ -632,10 +633,17 @@ class SentinelBugwatch(commands.Cog):
         self.last_new_intake_at: Dict[int, float] = {}
         self._whitelist_cache: Tuple[float, set[int]] = (0.0, set())
         self._ticket_view = SentinelTicketView(self)
+        self._sheet_sync_signatures: Dict[str, str] = {}
+        self._sheet_sync_task = asyncio.create_task(self._sheet_sync_loop())
         try:
             self.bot.add_view(self._ticket_view)
         except Exception as e:
             print(f"[Sentinel] Failed to register persistent ticket view: {e}")
+
+    def cog_unload(self) -> None:
+        task = getattr(self, "_sheet_sync_task", None)
+        if task and not task.done():
+            task.cancel()
 
     # ----------------------------
     # Sheet helpers
@@ -807,6 +815,7 @@ class SentinelBugwatch(commands.Cog):
         if "updated_at" in hmap and "updated_at" not in fields:
             updates[hmap["updated_at"]] = _now_iso()
         await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
 
     # ----------------------------
     # Ticket building / Discord IO
@@ -899,6 +908,12 @@ class SentinelBugwatch(commands.Cog):
         if status_l == "completed":
             description = "This report has been completed and closed by OFS IT."
             important = "The Sentinel has marked this bug report resolved. Thank you for helping improve OFS systems."
+        elif status_l == "dismissed":
+            description = "This report has been dismissed by authorized OFS staff."
+            important = "The Sentinel has closed this report as dismissed. No active investigation is pending unless staff reopen it."
+        elif status_l == "duplicate":
+            description = "This report has been marked as a duplicate of an existing ticket."
+            important = "The Sentinel has closed this duplicate report and will track the issue through the primary ticket."
         elif verification_l in {"confirmed bug", "reproduced"}:
             description = "Your report has been confirmed/reproduced and is now under IT review."
             important = (
@@ -1083,6 +1098,119 @@ class SentinelBugwatch(commands.Cog):
         except Exception as e:
             print(f"[Sentinel] Failed to rename ticket thread for {ticket_id}: {e}")
 
+    def _sheet_sync_signature(self, row: List[str], hmap: Dict[str, int]) -> str:
+        keys = ("status", "verification", "severity", "recommendation", "next_step", "dismissal_reason", "resolution_notes", "closed_at")
+        return "\u241f".join(_get_row_value(row, hmap.get(key)).strip() for key in keys)
+
+    def _remember_ticket_signature_from_updates(self, ticket_id: str, row: List[str], hmap: Dict[str, int], updates: Dict[int, str]) -> None:
+        updated_row = list(row)
+        for idx, val in updates.items():
+            while len(updated_row) <= idx:
+                updated_row.append("")
+            updated_row[idx] = str(val)
+        self._sheet_sync_signatures[ticket_id] = self._sheet_sync_signature(updated_row, hmap)
+
+    async def _sheet_sync_loop(self) -> None:
+        try:
+            await self.bot.wait_until_ready()
+            first_pass = True
+            while not self.bot.is_closed():
+                try:
+                    await self._sync_sheet_ticket_surfaces(initial=first_pass)
+                    first_pass = False
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    print(f"[Sentinel] Sheet-to-Discord sync failed: {e}")
+                await asyncio.sleep(max(30, SHEET_SYNC_INTERVAL_SECONDS))
+        except asyncio.CancelledError:
+            return
+
+    async def _sync_sheet_ticket_surfaces(self, initial: bool = False) -> None:
+        _ws, _headers, hmap, values = await self._load_bug_headers()
+        ticket_idx = hmap.get("ticket_id")
+        if ticket_idx is None:
+            return
+        for row in values[1:]:
+            ticket_id = _get_row_value(row, ticket_idx)
+            if not ticket_id:
+                continue
+            signature = self._sheet_sync_signature(row, hmap)
+            previous = self._sheet_sync_signatures.get(ticket_id)
+            self._sheet_sync_signatures[ticket_id] = signature
+            if previous is None:
+                # Startup pass repairs stale embeds/thread names from the Sheet without spamming ticket threads.
+                if initial:
+                    await self._sync_ticket_discord_surfaces_from_row(ticket_id, row, hmap, post_audit=False, reason="startup sheet repair")
+                continue
+            if signature != previous:
+                await self._sync_ticket_discord_surfaces_from_row(ticket_id, row, hmap, post_audit=True, reason="sheet change detected")
+
+    async def _sync_ticket_discord_surfaces_from_row(
+        self,
+        ticket_id: str,
+        row: List[str],
+        hmap: Dict[str, int],
+        *,
+        post_audit: bool = False,
+        reason: str = "sheet sync",
+    ) -> None:
+        status = _get_row_value(row, hmap.get("status")) or "Unknown"
+        verification = _get_row_value(row, hmap.get("verification")) or "Unverified"
+        severity = _get_row_value(row, hmap.get("severity")) or "Unknown"
+        recommendation = _get_row_value(row, hmap.get("recommendation")) or _get_row_value(row, hmap.get("next_step")) or "Awaiting triage."
+        affected_system = _get_row_value(row, hmap.get("affected_system")) or "Ticket"
+
+        update_fields: Dict[int, str] = {}
+        for key in ("status", "verification", "severity", "recommendation", "next_step", "dismissal_reason", "resolution_notes", "closed_at"):
+            idx = hmap.get(key)
+            if idx is not None:
+                update_fields[idx] = _get_row_value(row, idx)
+        await self._update_public_status_embed(ticket_id, row, hmap, update_fields)
+
+        admin_msg_id = _get_row_value(row, hmap.get("admin_message_id"))
+        if admin_msg_id.isdigit():
+            try:
+                admin_channel = self.bot.get_channel(ADMIN_REPORT_CHANNEL_ID) or await self.bot.fetch_channel(ADMIN_REPORT_CHANNEL_ID)
+                if isinstance(admin_channel, discord.TextChannel):
+                    admin_msg = await admin_channel.fetch_message(int(admin_msg_id))
+                    if admin_msg.embeds:
+                        embed = admin_msg.embeds[0]
+                        embed.color = _ticket_color(severity, status)
+                        embed.description = _ticket_description_for(verification, status)
+                        for i, field in enumerate(embed.fields):
+                            if field.name == "Status":
+                                embed.set_field_at(i, name="Status", value=status, inline=True)
+                            elif field.name == "Verification":
+                                embed.set_field_at(i, name="Verification", value=verification, inline=True)
+                            elif field.name == "Severity":
+                                embed.set_field_at(i, name="Severity", value=severity, inline=True)
+                            elif field.name == "Oracle Recommendation":
+                                embed.set_field_at(i, name="Oracle Recommendation", value=_truncate_field(recommendation), inline=False)
+                        await admin_msg.edit(embed=embed, view=self._ticket_view)
+            except Exception as e:
+                print(f"[Sentinel] Sheet sync could not update admin embed for {ticket_id}: {e}")
+
+        thread_id = _get_row_value(row, hmap.get("admin_thread_id"))
+        await self._rename_ticket_thread(thread_id, ticket_id, affected_system, status)
+        await self._update_workspace_embed(thread_id, ticket_id, status, verification, severity, recommendation)
+
+        if post_audit and str(thread_id or "").isdigit():
+            thread = self.bot.get_channel(int(thread_id))
+            if thread is None:
+                try:
+                    thread = await self.bot.fetch_channel(int(thread_id))
+                except Exception:
+                    thread = None
+            if isinstance(thread, discord.Thread):
+                note = (
+                    f"Sheet status sync detected an external Oracle/admin update for **{ticket_id}**.\n"
+                    f"Status: **{status}**\n"
+                    f"Verification: **{verification}**\n"
+                    f"Reason: {reason}"
+                )
+                await thread.send(embed=discord.Embed(title="🔄 Ticket Synced From Sheet", description=note, color=_ticket_color(severity, status), timestamp=_now_utc()))
+
     def _extract_ticket_id_from_interaction(self, interaction: discord.Interaction) -> str:
         msg = interaction.message
         if not msg:
@@ -1216,6 +1344,7 @@ class SentinelBugwatch(commands.Cog):
             if "updated_at" in hmap:
                 updates[hmap["updated_at"]] = _now_iso()
             await self._update_cells(ws, row_num, updates)
+            self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
             return
 
     # ----------------------------
@@ -1350,6 +1479,7 @@ class SentinelBugwatch(commands.Cog):
             updates[hmap["last_updated_by"]] = f"{message.author} ({message.author.id})"
 
         await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
         await self._update_public_status_embed(ticket_id, row, hmap, updates)
 
         admin_msg_id = _get_row_value(row, hmap.get("admin_message_id"))
@@ -1489,6 +1619,7 @@ class SentinelBugwatch(commands.Cog):
         if confirmation_detected and "next_step" in hmap:
             updates[hmap["next_step"]] = "Prepare Oracle brief from the ticket thread and gathered evidence."
         await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
         if confirmation_detected:
             await self._update_public_status_embed(ticket_id, row, hmap, updates)
 
@@ -1754,6 +1885,7 @@ class SentinelBugwatch(commands.Cog):
             updates[hmap["last_updated_by"]] = f"{interaction.user} ({interaction.user.id})"
 
         await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
         await self._update_public_status_embed(ticket_id, row, hmap, updates)
 
         # Update admin embed if possible by rebuilding lightweight fields in place.
