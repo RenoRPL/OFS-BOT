@@ -1,7 +1,12 @@
+import asyncio
 from datetime import timezone
+from types import SimpleNamespace
 
+import cogs.sentinel_lorewatch as lorewatch
 from cogs.sentinel_lorewatch import (
     LORE_HEADER_ALIASES,
+    PRIMARY_APPROVER_ID,
+    SentinelLorewatch,
     _default_april_backfill_start,
     _find_duplicate_lore,
     _header_map,
@@ -94,3 +99,26 @@ def test_default_april_backfill_start_uses_current_year():
     assert default_start.hour == 0
     assert default_start.minute == 0
     assert default_start.tzinfo == timezone.utc
+
+
+def test_lore_backfill_authority_is_primary_approver_only(monkeypatch):
+    class FakeMember:
+        def __init__(self, user_id, *, administrator=False, manage_guild=False):
+            self.id = user_id
+            self.guild_permissions = SimpleNamespace(
+                administrator=administrator,
+                manage_guild=manage_guild,
+            )
+
+    monkeypatch.setattr(lorewatch.discord, "Member", FakeMember)
+    cog = SentinelLorewatch(bot=SimpleNamespace())
+
+    allowed = SimpleNamespace(user=FakeMember(PRIMARY_APPROVER_ID))
+    admin = SimpleNamespace(user=FakeMember(111, administrator=True))
+    manager = SimpleNamespace(user=FakeMember(222, manage_guild=True))
+    regular = SimpleNamespace(user=FakeMember(333))
+
+    assert asyncio.run(cog._user_can_run_backfill(allowed)) is True
+    assert asyncio.run(cog._user_can_run_backfill(admin)) is False
+    assert asyncio.run(cog._user_can_run_backfill(manager)) is False
+    assert asyncio.run(cog._user_can_run_backfill(regular)) is False

@@ -382,12 +382,7 @@ class SentinelLorewatch(commands.Cog):
 
     async def _user_can_run_backfill(self, interaction: discord.Interaction) -> bool:
         user = interaction.user
-        if int(getattr(user, "id", 0)) == PRIMARY_APPROVER_ID:
-            return True
-        if isinstance(user, discord.Member):
-            perms = user.guild_permissions
-            return bool(perms.administrator or perms.manage_guild)
-        return False
+        return int(getattr(user, "id", 0)) == PRIMARY_APPROVER_ID
 
     async def _backfill_chronicles(self, *, since: datetime, limit: int) -> Dict[str, int]:
         channel = self.bot.get_channel(CHRONICLES_CHANNEL_ID)
@@ -415,7 +410,6 @@ class SentinelLorewatch(commands.Cog):
                 counts["ignored"] += 1
         return counts
 
-    @app_commands.default_permissions(manage_guild=True)
     @app_commands.command(name="lore_backfill", description="Backfill Chronicles lore posts into Lore Intake review tickets.")
     @app_commands.describe(
         since="Start date in YYYY-MM-DD format. Defaults to April 1 of the current year.",
