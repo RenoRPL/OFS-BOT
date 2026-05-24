@@ -190,6 +190,7 @@ HEADER_ALIASES: Dict[str, List[str]] = {
     "original_report": ["Original Report", "Claim", "Report"],
     "clarifying_questions": ["Clarifying Questions", "Questions Asked"],
     "clarifying_answers": ["Clarifying Answers", "Follow-up Details", "Follow Ups", "Followups"],
+    "reporter_notes": ["Reporter Notes", "Public Reporter Notes", "User Notes", "Reporter Follow-ups"],
     "attachments": ["Attachments", "Attachment URLs", "Screenshot URLs"],
     "related_ticket_ids": ["Related Ticket IDs", "Related Tickets"],
     "duplicate_of": ["Duplicate Of"],
@@ -598,6 +599,24 @@ class SentinelTextModal(discord.ui.Modal):
         await self.cog.handle_ticket_action(interaction, self.action, str(self.value.value))
 
 
+class SentinelReporterNoteModal(discord.ui.Modal):
+    def __init__(self, cog: "SentinelBugwatch", ticket_id: str):
+        super().__init__(title=f"Add Note — {ticket_id}", timeout=300)
+        self.cog = cog
+        self.ticket_id = ticket_id
+        self.value = discord.ui.TextInput(
+            label="Additional note for OFS IT",
+            placeholder="Add new details, reproduction steps, or what changed since the original report.",
+            required=True,
+            style=discord.TextStyle.paragraph,
+            max_length=1200,
+        )
+        self.add_item(self.value)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_public_ticket_note_interaction(interaction, self.ticket_id, str(self.value.value))
+
+
 class SentinelChoiceSelect(discord.ui.Select):
     def __init__(self, cog: "SentinelBugwatch", action: str, values: List[str], placeholder: str, ticket_id: str, admin_message_id: int):
         options = [discord.SelectOption(label=value, value=value) for value in values[:25]]
@@ -669,6 +688,20 @@ class SentinelTicketView(discord.ui.View):
         await self.cog.handle_ticket_action(interaction, "oracle_brief", "Requested")
 
 
+class SentinelPublicTicketView(discord.ui.View):
+    def __init__(self, cog: "SentinelBugwatch"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Add Note", style=discord.ButtonStyle.primary, custom_id="sentinel:public_add_note")
+    async def add_note(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        ticket_id = self.cog._extract_ticket_id_from_interaction(interaction)
+        if not ticket_id:
+            await interaction.response.send_message("Unable to identify ticket for this note.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SentinelReporterNoteModal(self.cog, ticket_id))
+
+
 # ---------------------------------------------------------------------------
 # The Sentinel Cog
 # ---------------------------------------------------------------------------
@@ -679,10 +712,12 @@ class SentinelBugwatch(commands.Cog):
         self.last_new_intake_at: Dict[int, float] = {}
         self._whitelist_cache: Tuple[float, set[int]] = (0.0, set())
         self._ticket_view = SentinelTicketView(self)
+        self._public_ticket_view = SentinelPublicTicketView(self)
         self._sheet_sync_signatures: Dict[str, str] = {}
         self._sheet_sync_task = asyncio.create_task(self._sheet_sync_loop())
         try:
             self.bot.add_view(self._ticket_view)
+            self.bot.add_view(self._public_ticket_view)
         except Exception as e:
             print(f"[Sentinel] Failed to register persistent ticket view: {e}")
 
@@ -782,6 +817,16 @@ class SentinelBugwatch(commands.Cog):
             if message_id and admin_msg_idx is not None and _get_row_value(row, admin_msg_idx) == str(message_id):
                 return ws, headers, hmap, row, row_num
             if thread_id and thread_idx is not None and _get_row_value(row, thread_idx) == str(thread_id):
+                return ws, headers, hmap, row, row_num
+        raise RuntimeError("Ticket row not found")
+
+    async def _find_ticket_by_id(self, ticket_id: str) -> Tuple[Any, List[str], Dict[str, int], List[str], int]:
+        ws, headers, hmap, values = await self._load_bug_headers()
+        ticket_idx = hmap.get("ticket_id")
+        if ticket_idx is None:
+            raise RuntimeError("Bug Reports tab needs a Ticket ID column")
+        for row_num, row in enumerate(values[1:], start=2):
+            if _get_row_value(row, ticket_idx).upper() == (ticket_id or "").upper():
                 return ws, headers, hmap, row, row_num
         raise RuntimeError("Ticket row not found")
 
@@ -1051,7 +1096,7 @@ class SentinelBugwatch(commands.Cog):
         async def edit_ack(msg: discord.Message) -> bool:
             if not self._public_ack_matches(msg, ticket_id):
                 return False
-            await msg.edit(embed=embed)
+            await msg.edit(embed=embed, view=self._public_ticket_view)
             if "public_ack_message_id" in hmap and not _get_row_value(row, hmap.get("public_ack_message_id")):
                 await self._update_ticket_row_by_id(ticket_id, {"public_ack_message_id": str(msg.id)})
             return True
@@ -1078,7 +1123,7 @@ class SentinelBugwatch(commands.Cog):
 
             # If the stored public message is itself a stale Sentinel/public card, update it directly.
             if self._original_public_embed_matches(original_msg, ticket_id):
-                await original_msg.edit(embed=embed)
+                await original_msg.edit(embed=embed, view=self._public_ticket_view)
                 if "public_ack_message_id" in hmap and not _get_row_value(row, hmap.get("public_ack_message_id")):
                     await self._update_ticket_row_by_id(ticket_id, {"public_ack_message_id": str(original_msg.id)})
                 return
@@ -1324,9 +1369,9 @@ class SentinelBugwatch(commands.Cog):
         )
         public_msg = None
         try:
-            public_msg = await message.reply(embed=public, mention_author=True)
+            public_msg = await message.reply(embed=public, view=self._public_ticket_view, mention_author=True)
         except Exception:
-            public_msg = await message.channel.send(embed=public)
+            public_msg = await message.channel.send(embed=public, view=self._public_ticket_view)
         if public_msg:
             await self._update_ticket_row_by_id(record.ticket_id, {"public_ack_message_id": str(public_msg.id)})
         return record
@@ -1374,7 +1419,10 @@ class SentinelBugwatch(commands.Cog):
             if _get_row_value(row, ticket_idx) != ticket_id:
                 continue
             updates: Dict[int, str] = {}
-            if "clarifying_answers" in hmap:
+            if "reporter_notes" in hmap:
+                existing = _get_row_value(row, hmap["reporter_notes"])
+                updates[hmap["reporter_notes"]] = _append_note(existing, note)
+            elif "clarifying_answers" in hmap:
                 existing = _get_row_value(row, hmap["clarifying_answers"])
                 updates[hmap["clarifying_answers"]] = _append_note(existing, note)
             elif "admin_notes" in hmap:
@@ -1392,6 +1440,99 @@ class SentinelBugwatch(commands.Cog):
             await self._update_cells(ws, row_num, updates)
             self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
             return
+
+    async def _append_public_ticket_note(
+        self,
+        ticket_id: str,
+        author: Any,
+        note_text: str,
+        attachments: Optional[List[str]] = None,
+        source_message: Optional[discord.Message] = None,
+    ) -> Tuple[bool, str]:
+        try:
+            ws, _headers, hmap, row, row_num = await self._find_ticket_by_id(ticket_id)
+        except Exception:
+            return False, "I could not find that ticket ID."
+
+        status = _get_row_value(row, hmap.get("status")) or "Submitted"
+        if status.lower() in TERMINAL_STATUSES:
+            return False, f"Ticket **{ticket_id}** is closed as **{status}**. Please open a new bug report if the issue is still happening."
+
+        reporter_id = _get_row_value(row, hmap.get("reporter_id"))
+        is_reporter = reporter_id.isdigit() and int(reporter_id) == int(author.id)
+        is_admin = await self._is_whitelisted_admin(int(author.id))
+        if not is_reporter and not is_admin:
+            return False, "Only the original reporter or a whitelisted admin can add notes to this ticket."
+
+        attachments = attachments or []
+        now = _now_iso()
+        clean_note = _clean_text(note_text or "", limit=1800)
+        note = f"[{now}] Reporter note from {author} ({author.id}): {clean_note or '[attachment only]'}"
+        if source_message:
+            note += f"\nSource: {_message_link(source_message)}"
+        if attachments:
+            note += "\nAttachments:\n" + "\n".join(attachments)
+
+        updates: Dict[int, str] = {}
+        note_key = "reporter_notes" if "reporter_notes" in hmap else "clarifying_answers" if "clarifying_answers" in hmap else "admin_notes" if "admin_notes" in hmap else "resolution_notes"
+        if note_key in hmap:
+            updates[hmap[note_key]] = _append_note(_get_row_value(row, hmap[note_key]), note)
+        if attachments and "attachments" in hmap:
+            updates[hmap["attachments"]] = _append_note(_get_row_value(row, hmap["attachments"]), "\n".join(attachments))
+        if "updated_at" in hmap:
+            updates[hmap["updated_at"]] = now
+        if "last_updated_by" in hmap:
+            updates[hmap["last_updated_by"]] = f"{author} ({author.id})"
+        await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
+
+        thread_id = _get_row_value(row, hmap.get("admin_thread_id"))
+        if thread_id.isdigit():
+            thread = self.bot.get_channel(int(thread_id))
+            if thread is None:
+                try:
+                    thread = await self.bot.fetch_channel(int(thread_id))
+                except Exception:
+                    thread = None
+            if isinstance(thread, discord.Thread):
+                embed = discord.Embed(
+                    title=f"📝 Reporter Note Added — {ticket_id}",
+                    description=_truncate_field(clean_note or "Attachment-only reporter update", 1200),
+                    color=discord.Color.blue(),
+                    timestamp=_now_utc(),
+                )
+                embed.add_field(name="Reporter", value=f"{getattr(author, 'mention', str(author))}\n`{author}` / `{author.id}`", inline=False)
+                if source_message:
+                    embed.add_field(name="Source", value=_message_link(source_message), inline=False)
+                if attachments:
+                    embed.add_field(name="Attachments", value=_truncate_field("\n".join(attachments), 1000), inline=False)
+                await thread.send(embed=embed)
+        return True, f"Your note was added to **{ticket_id}** and sent to OFS review."
+
+    async def handle_public_ticket_note_interaction(self, interaction: discord.Interaction, ticket_id: str, note_text: str) -> None:
+        ok, response = await self._append_public_ticket_note(ticket_id, interaction.user, note_text, attachments=[])
+        await interaction.response.send_message(response, ephemeral=True)
+
+    async def _handle_public_ticket_reference_message(self, message: discord.Message) -> bool:
+        text = _clean_text(message.content or "")
+        attachment_urls = [a.url for a in message.attachments]
+        match = re.search(r"\b(?:BUG|FR)-\d{8}-\d{3}\b", text, re.IGNORECASE)
+        if not match or not (text or attachment_urls):
+            return False
+        ticket_id = match.group(0).upper()
+        note_text = re.sub(r"\b(?:BUG|FR)-\d{8}-\d{3}\b", "", text, count=1, flags=re.IGNORECASE).strip(" :-—")
+        if not note_text and not attachment_urls:
+            try:
+                await message.reply(f"To add a note to **{ticket_id}**, include the note text or an image/attachment with the ticket number.", mention_author=True)
+            except Exception:
+                pass
+            return True
+        ok, response = await self._append_public_ticket_note(ticket_id, message.author, note_text, attachments=attachment_urls, source_message=message)
+        try:
+            await message.reply(("📎 " if ok else "⚠️ ") + response, mention_author=True)
+        except Exception:
+            pass
+        return True
 
     # ----------------------------
     # Message listeners
@@ -1415,6 +1556,11 @@ class SentinelBugwatch(commands.Cog):
         user_id = int(message.author.id)
         text = _clean_text(message.content or "")
         attachment_urls = [a.url for a in message.attachments]
+
+        # If a user names an existing ticket ID in the public bug channel, attach the
+        # message/attachments to that ticket instead of opening a new report.
+        if await self._handle_public_ticket_reference_message(message):
+            return
 
         # Existing active intake/ticket: treat as follow-up.
         intake = self.intakes.get(user_id)
