@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import cogs.sentinel_lorewatch as lorewatch
@@ -15,6 +15,13 @@ from cogs.sentinel_lorewatch import (
     _oracle_handoff_message,
     _oracle_mention,
     _parse_backfill_since,
+    _group_chronicle_messages,
+    _message_group_text,
+    _message_group_source_ids,
+    _message_ids_already_ticketed,
+    _default_may_backfill_start,
+    _default_may_backfill_end,
+    _parse_backfill_until,
 )
 
 
@@ -154,3 +161,79 @@ def test_lore_backfill_authority_is_primary_approver_only(monkeypatch):
     assert asyncio.run(cog._user_can_run_backfill(admin)) is False
     assert asyncio.run(cog._user_can_run_backfill(manager)) is False
     assert asyncio.run(cog._user_can_run_backfill(regular)) is False
+
+
+def _fake_lore_message(message_id, author_id, content, created_at):
+    return SimpleNamespace(
+        id=message_id,
+        content=content,
+        created_at=created_at,
+        author=SimpleNamespace(id=author_id, bot=False),
+        attachments=[],
+    )
+
+
+def test_group_chronicle_messages_combines_same_author_story_parts():
+    start = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+    messages = [
+        _fake_lore_message(101, 7, "The Burning of the Shattered Blade begins with the fleet in shadow.", start),
+        _fake_lore_message(102, 7, "I. The Wounding of the Endeavor carried the same Chronicle forward.", start + timedelta(minutes=3)),
+        _fake_lore_message(103, 7, "II. The flames rose again as the same tale continued beyond Discord limits.", start + timedelta(minutes=6)),
+    ]
+
+    groups = _group_chronicle_messages(messages)
+
+    assert len(groups) == 1
+    assert [m.id for m in groups[0]] == [101, 102, 103]
+    assert _message_group_source_ids(groups[0]) == "101,102,103"
+    merged = _message_group_text(groups[0])
+    assert "[Discord message 101]" in merged
+    assert "[Discord message 103]" in merged
+    assert "same tale continued" in merged
+
+
+def test_group_chronicle_messages_splits_different_authors_or_large_gaps():
+    start = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+    messages = [
+        _fake_lore_message(201, 7, "A substantial first Chronicle entry that should stand on its own.", start),
+        _fake_lore_message(202, 8, "Another substantial Chronicle entry from another author entirely.", start + timedelta(minutes=2)),
+        _fake_lore_message(203, 7, "A later substantial Chronicle from the original author after another author break.", start + timedelta(hours=8)),
+    ]
+
+    groups = _group_chronicle_messages(messages)
+
+    assert [[m.id for m in group] for group in groups] == [[201], [202], [203]]
+
+
+def test_group_chronicle_messages_keeps_uninterrupted_same_author_run_together_even_over_long_gap():
+    start = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+    messages = [
+        _fake_lore_message(301, 7, "The Burning of the Shattered Blade opens as one long Chronicle entry.", start),
+        _fake_lore_message(302, 7, "I. The Wounding of the Endeavor continues the same uninterrupted story.", start + timedelta(hours=8)),
+        _fake_lore_message(303, 7, "II. The Rally of the First Fleet continues with no author/avatar break.", start + timedelta(hours=16)),
+    ]
+
+    groups = _group_chronicle_messages(messages)
+
+    assert [[m.id for m in group] for group in groups] == [[301, 302, 303]]
+
+
+def test_default_backfill_window_is_may_2026_only():
+    assert _default_may_backfill_start() == datetime(2026, 5, 1, tzinfo=timezone.utc)
+    assert _default_may_backfill_end() == datetime(2026, 6, 1, tzinfo=timezone.utc)
+    assert _parse_backfill_since(None) == datetime(2026, 5, 1, tzinfo=timezone.utc)
+    assert _parse_backfill_until(None) == datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def test_message_ids_already_ticketed_reads_single_and_grouped_source_columns():
+    headers = ["Lore ID", "Status", "Source Message ID", "Source Message IDs", "Original Text"]
+    rows = [
+        headers,
+        ["LORE-20260501-001", "Captured", "101", "101,102,103", "A grouped Chronicle"],
+        ["LOREWATCH-CHECKPOINT", "System Checkpoint", "103", "", ""],
+    ]
+    hmap = _header_map(headers, LORE_HEADER_ALIASES)
+
+    ticketed = _message_ids_already_ticketed(rows, hmap)
+
+    assert ticketed == {"101", "102", "103"}
