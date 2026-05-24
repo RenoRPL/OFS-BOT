@@ -22,6 +22,8 @@ from cogs.sentinel_lorewatch import (
     _default_may_backfill_start,
     _default_may_backfill_end,
     _parse_backfill_until,
+    _build_lore_source_packet,
+    _chunk_discord_text,
 )
 
 
@@ -237,3 +239,54 @@ def test_message_ids_already_ticketed_reads_single_and_grouped_source_columns():
     ticketed = _message_ids_already_ticketed(rows, hmap)
 
     assert ticketed == {"101", "102", "103"}
+
+
+def test_build_lore_source_packet_keeps_full_grouped_context_and_links():
+    start = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+    messages = [
+        SimpleNamespace(
+            id=401,
+            content="Opening Chronicle text " + ("alpha " * 120),
+            created_at=start,
+            guild=SimpleNamespace(id=111),
+            channel=SimpleNamespace(id=222),
+            author=SimpleNamespace(id=7, bot=False),
+            attachments=[SimpleNamespace(url="https://cdn.discordapp.com/lore-a.png")],
+        ),
+        SimpleNamespace(
+            id=402,
+            content="Continuation Chronicle text " + ("beta " * 120),
+            created_at=start + timedelta(minutes=5),
+            guild=SimpleNamespace(id=111),
+            channel=SimpleNamespace(id=222),
+            author=SimpleNamespace(id=7, bot=False),
+            attachments=[],
+        ),
+    ]
+
+    packet = _build_lore_source_packet(
+        "LORE-20260524-001",
+        messages,
+        "Chronicles / Timeline",
+        "Chronicles sequence; Oracle should determine exact Chronicle/Age placement.",
+    )
+
+    assert "FULL LORE SOURCE PACKET" in packet
+    assert "Lore ID: LORE-20260524-001" in packet
+    assert "Grouped Source Message IDs: 401,402" in packet
+    assert "https://discord.com/channels/111/222/401" in packet
+    assert "https://discord.com/channels/111/222/402" in packet
+    assert "https://cdn.discordapp.com/lore-a.png" in packet
+    assert "alpha alpha alpha" in packet
+    assert "beta beta beta" in packet
+    assert not packet.endswith("...")
+
+
+def test_chunk_discord_text_preserves_content_under_discord_message_limit():
+    text = "HEADER\n" + ("0123456789" * 500)
+
+    chunks = _chunk_discord_text(text, limit=1900)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    assert "".join(chunks) == text

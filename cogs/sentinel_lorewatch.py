@@ -254,6 +254,78 @@ def _message_group_attachment_urls(messages: List[discord.Message]) -> List[str]
     return urls
 
 
+def _chunk_discord_text(text: str, *, limit: int = 1900) -> List[str]:
+    """Split text into Discord-safe chunks while preserving exact content."""
+    if limit <= 0:
+        raise ValueError("chunk limit must be positive")
+    if not text:
+        return [""]
+    chunks: List[str] = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start : start + limit])
+        start += limit
+    return chunks
+
+
+def _build_lore_source_packet(
+    lore_id: str,
+    messages: List[discord.Message],
+    area: str,
+    placement: str,
+) -> str:
+    """Build the full plain-text context packet that Oracle/Hermes can read in-thread."""
+    first = messages[0]
+    attachment_urls = _message_group_attachment_urls(messages)
+    lines = [
+        "FULL LORE SOURCE PACKET",
+        f"Lore ID: {lore_id}",
+        f"Source Channel ID: {getattr(first.channel, 'id', '')}",
+        f"Author: {first.author} (`{getattr(first.author, 'id', '')}`)",
+        f"Initial Classification: {area}",
+        f"Placement Hint: {placement}",
+        f"Grouped Source Message IDs: {_message_group_source_ids(messages)}",
+        "",
+        "Source Links:",
+    ]
+    for message in messages:
+        lines.append(f"- Discord message {message.id}: {_message_link(message)}")
+    lines.extend(["", "Attachments:"])
+    if attachment_urls:
+        lines.extend(f"- {url}" for url in attachment_urls)
+    else:
+        lines.append("- None")
+    lines.extend(["", "Original Chronicle Text:"])
+    for index, message in enumerate(messages, start=1):
+        created = _message_created_at(message).isoformat(timespec="seconds")
+        content = (getattr(message, "content", "") or "").strip() or "[No text content]"
+        lines.extend(
+            [
+                "",
+                f"--- Message {index}/{len(messages)} | Discord ID {message.id} | {created} ---",
+                content,
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Required Oracle Output:",
+            "- Canon Classification",
+            "- Suggested Site Target",
+            "- Suggested Timeline Placement",
+            "- Suggested Codex Placement",
+            "- Chronicle Summary",
+            "- Site-Ready Draft",
+            "- Image Use",
+            "- Canon Conflicts / Duplicate Risk",
+            "- Approval Needed",
+            "",
+            "Boundary: do not publish or mutate site content without explicit human approval.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _group_chronicle_messages(
     messages: List[discord.Message],
     *,
@@ -519,7 +591,8 @@ class SentinelLorewatch(commands.Cog):
         )
         return embed
 
-    async def _create_admin_ticket(self, lore_id: str, message: discord.Message, area: str, placement: str, text: str, attachment_urls: List[str]) -> Tuple[discord.Message, Optional[discord.Thread]]:
+    async def _create_admin_ticket(self, lore_id: str, messages: List[discord.Message], area: str, placement: str, text: str, attachment_urls: List[str]) -> Tuple[discord.Message, Optional[discord.Thread]]:
+        message = messages[0]
         channel = self.bot.get_channel(ADMIN_REPORT_CHANNEL_ID)
         if channel is None:
             channel = await self.bot.fetch_channel(ADMIN_REPORT_CHANNEL_ID)
@@ -534,6 +607,13 @@ class SentinelLorewatch(commands.Cog):
                 content=_oracle_handoff_message(lore_id, message, area, placement, text, attachment_urls),
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
+            source_packet = _build_lore_source_packet(lore_id, messages, area, placement)
+            packet_chunks = _chunk_discord_text(source_packet, limit=1750)
+            for index, chunk in enumerate(packet_chunks, start=1):
+                await thread.send(
+                    content=f"FULL LORE SOURCE PACKET {index}/{len(packet_chunks)}\n```text\n{chunk}\n```",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             await thread.send(embed=self._build_workspace_embed(lore_id, area, placement))
         except Exception as e:
             print(f"[Lorewatch] Failed to create lore thread for {lore_id}: {e}")
@@ -604,7 +684,7 @@ class SentinelLorewatch(commands.Cog):
                 },
             )
             await self._append_lore_row(ws, row)
-            admin_msg, thread = await self._create_admin_ticket(lore_id, first, area, placement, text, attachment_urls)
+            admin_msg, thread = await self._create_admin_ticket(lore_id, messages, area, placement, text, attachment_urls)
             updates = {
                 "admin_message_id": str(admin_msg.id),
                 "updated_at": _now_iso(),
