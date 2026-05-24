@@ -138,8 +138,8 @@ COMPLETION_PHRASES = (
     "mark complete",
     "complete this",
     "complete ticket",
-    "close this",
-    "close ticket",
+    "close this as complete",
+    "close ticket as complete",
     "that fixed it",
     "this is fixed",
     "bug is fixed",
@@ -148,6 +148,19 @@ COMPLETION_PHRASES = (
     "issue resolved",
     "finish this",
 )
+STATUS_INTENT_PATTERNS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("Dismissed", ("mark this dismissed", "mark as dismissed", "mark dismissed", "dismiss this", "dismiss ticket", "dismiss report", "dismiss this bug", "dismiss this report", "close as dismissed", "close this as dismissed", "this was a test bug", "test bug", "not a bug", "false report", "invalid report")),
+    ("Duplicate", ("mark duplicate", "mark as duplicate", "this is duplicate", "duplicate report", "duplicate ticket", "close as duplicate")),
+    ("Completed", ("mark this complete", "mark as complete", "mark complete", "complete this", "complete ticket", "close this as complete", "close ticket as complete", "that fixed it", "this is fixed", "bug is fixed", "fixed it", "resolved", "issue resolved", "finish this")),
+    ("Resolved Pending Verification", ("resolved pending verification", "pending verification", "needs verification from reporter", "waiting for verification", "ready for verification")),
+    ("Fix Proposed", ("fix proposed", "proposed fix", "patch proposed", "solution proposed")),
+    ("In Review", ("mark in review", "set in review", "move to review", "oracle review", "under review", "reviewing")),
+    ("Confirmed Bug", ("confirmed bug", "mark confirmed", "confirmed issue", "reproduced", "verified bug", "i reproduced this", "i can reproduce")),
+    ("Needs Verification", ("needs verification", "mark needs verification", "needs confirming", "needs confirmation")),
+    ("Needs Info", ("needs info", "needs details", "awaiting details", "need more info", "need more details", "ask for details")),
+    ("Triaged", ("mark triaged", "triaged", "initial triage done")),
+    ("Submitted", ("mark submitted", "back to submitted", "reset to submitted")),
+]
 TERMINAL_STATUSES = {"completed", "dismissed", "duplicate"}
 OPEN_THREAD_EMOJI = "⬜"
 CLOSED_THREAD_EMOJI = "✅"
@@ -430,9 +443,41 @@ def _is_completion_intent(text: str) -> bool:
         return True
     return bool(
         re.search(r"\bmark\b.{0,80}\bcomplete\b", lowered)
-        or re.search(r"\b(close|finish)\b.{0,80}\b(ticket|report|bug)\b", lowered)
         or re.search(r"\b(bug|issue|report|fix)\b.{0,80}\b(fixed|resolved|complete|completed)\b", lowered)
     )
+
+
+def _status_intent_from_text(text: str) -> Optional[str]:
+    lowered = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if not lowered:
+        return None
+    for status, phrases in STATUS_INTENT_PATTERNS:
+        if any(phrase in lowered for phrase in phrases):
+            return status
+    if re.search(r"\bmark\b.{0,80}\bdismiss(?:ed)?\b", lowered) or re.search(r"\bdismiss\b.{0,80}\b(ticket|report|bug|this)\b", lowered):
+        return "Dismissed"
+    if re.search(r"\bmark\b.{0,80}\bduplicate\b", lowered):
+        return "Duplicate"
+    if _is_completion_intent(lowered):
+        return "Completed"
+    if re.search(r"\bmark\b.{0,80}\b(needs info|needs details|awaiting details)\b", lowered):
+        return "Needs Info"
+    if re.search(r"\bmark\b.{0,80}\b(in review|under review)\b", lowered):
+        return "In Review"
+    if re.search(r"\bmark\b.{0,80}\b(fix proposed|proposed fix)\b", lowered):
+        return "Fix Proposed"
+    return None
+
+
+def _status_change_reason(status: str, text: str) -> str:
+    clean = _clean_text(text or "", limit=700)
+    if clean:
+        return clean
+    if status == "Dismissed":
+        return "Dismissed by primary approver from ticket thread."
+    if status == "Duplicate":
+        return "Marked duplicate by primary approver from ticket thread."
+    return f"Marked {status} by primary approver from ticket thread."
 
 
 def _thread_status_emoji(status: str) -> str:
@@ -1531,6 +1576,106 @@ class SentinelBugwatch(commands.Cog):
             pass
         print(f"[Sentinel] Completed ticket {ticket_id} from primary approver message {message.id}")
 
+    async def _set_ticket_status_from_message(
+        self,
+        message: discord.Message,
+        ws: Any,
+        row: List[str],
+        hmap: Dict[str, int],
+        row_num: int,
+        ticket_id: str,
+        status: str,
+        text: str,
+    ) -> None:
+        """Apply a primary-approver natural-language status change everywhere."""
+        now = _now_iso()
+        old_status = _get_row_value(row, hmap.get("status")) or "Unknown"
+        severity = _get_row_value(row, hmap.get("severity")) or "Unknown"
+        verification = _get_row_value(row, hmap.get("verification")) or "Unverified"
+        reason = _status_change_reason(status, text)
+
+        if status == "Confirmed Bug" and verification.lower() in {"", "unverified", "unknown"}:
+            verification = "Confirmed Bug"
+        elif status in {"Resolved Pending Verification", "Fix Proposed"} and verification.lower() in {"", "unverified", "unknown"}:
+            verification = "Confirmed Bug"
+
+        if status == "Dismissed":
+            recommendation = "Dismissed by primary approver. No further Sentinel action pending unless staff reopen the report."
+            next_step = "Closed. Bug report dismissed by primary approver."
+        elif status == "Duplicate":
+            recommendation = "Marked duplicate by primary approver. Track any remaining work through the primary ticket."
+            next_step = "Closed as duplicate."
+        elif status == "Resolved Pending Verification":
+            recommendation = "Fix or resolution appears ready; wait for verification before completion."
+            next_step = "Verify the fix, then mark complete or reopen investigation."
+        elif status == "Fix Proposed":
+            recommendation = "A fix has been proposed; review and approve implementation/deployment before completion."
+            next_step = "Review proposed fix and record approval or requested changes."
+        elif status == "In Review":
+            recommendation = "Ticket is under Oracle/IT review. Gather findings and propose the next smallest action."
+            next_step = "Continue Oracle/IT review; do not close until outcome is explicit."
+        elif status == "Needs Info":
+            recommendation = "More reporter/admin detail is required before the ticket can move toward closure."
+            next_step = "Ask for reproduction steps, screenshot, affected page/command, or exact error."
+        else:
+            recommendation = f"Status changed to {status} by primary approver. Continue with the next closure step."
+            next_step = f"Proceed according to status: {status}."
+
+        note = f"[{now}] Status changed by {message.author} ({message.author.id}) from {old_status} to {status}: {reason}"
+        updates: Dict[int, str] = {}
+        if "status" in hmap:
+            updates[hmap["status"]] = status
+        if "verification" in hmap and verification != _get_row_value(row, hmap.get("verification")):
+            updates[hmap["verification"]] = verification
+        if "recommendation" in hmap:
+            updates[hmap["recommendation"]] = recommendation
+        if "next_step" in hmap:
+            updates[hmap["next_step"]] = next_step
+        if status == "Dismissed":
+            if "dismissal_reason" in hmap:
+                updates[hmap["dismissal_reason"]] = reason
+            if "dismissed_by" in hmap:
+                updates[hmap["dismissed_by"]] = f"{message.author} ({message.author.id})"
+        if status in {"Completed", "Dismissed", "Duplicate"} and "closed_at" in hmap:
+            updates[hmap["closed_at"]] = now
+        if "resolution_notes" in hmap:
+            updates[hmap["resolution_notes"]] = _append_note(_get_row_value(row, hmap["resolution_notes"]), note)
+        if "updated_at" in hmap:
+            updates[hmap["updated_at"]] = now
+        if "last_updated_by" in hmap:
+            updates[hmap["last_updated_by"]] = f"{message.author} ({message.author.id})"
+
+        await self._update_cells(ws, row_num, updates)
+        self._remember_ticket_signature_from_updates(ticket_id, row, hmap, updates)
+        updated_row = list(row)
+        for idx, value in updates.items():
+            while len(updated_row) <= idx:
+                updated_row.append("")
+            updated_row[idx] = str(value)
+        await self._sync_ticket_discord_surfaces_from_row(ticket_id, updated_row, hmap, post_audit=False, reason="approver status intent")
+
+        color = _ticket_color(severity, status)
+        status_embed = discord.Embed(
+            title=f"📌 Ticket Status Updated — {ticket_id}",
+            description=(
+                f"Updated by {message.author.mention}.\n\n"
+                f"Old Status: **{old_status}**\n"
+                f"New Status: **{status}**\n\n"
+                "The Sentinel wrote the Google Sheet record and synchronized Discord surfaces."
+            ),
+            color=color,
+            timestamp=_now_utc(),
+        )
+        status_embed.add_field(name="Reason", value=_truncate_field(reason, 900), inline=False)
+        if status in {"Dismissed", "Duplicate"}:
+            status_embed.add_field(name="Lifecycle", value="Closed / terminal", inline=True)
+        await message.channel.send(embed=status_embed)
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+        print(f"[Sentinel] Changed ticket {ticket_id} from {old_status} to {status} from primary approver message {message.id}")
+
     async def _is_oracle_discussion_message(self, message: discord.Message) -> bool:
         """Do not auto-log human replies that are part of Oracle troubleshooting chat.
 
@@ -1567,9 +1712,14 @@ class SentinelBugwatch(commands.Cog):
             return
 
         ticket_id = _get_row_value(row, hmap.get("ticket_id"))
-        if int(message.author.id) == PRIMARY_APPROVER_ID and text and _is_completion_intent(text):
-            await self._complete_ticket_from_message(message, ws, row, hmap, row_num, ticket_id, text)
-            return
+        if int(message.author.id) == PRIMARY_APPROVER_ID and text:
+            requested_status = _status_intent_from_text(text)
+            if requested_status == "Completed":
+                await self._complete_ticket_from_message(message, ws, row, hmap, row_num, ticket_id, text)
+                return
+            if requested_status:
+                await self._set_ticket_status_from_message(message, ws, row, hmap, row_num, ticket_id, requested_status, text)
+                return
 
         if await self._is_oracle_discussion_message(message):
             try:
