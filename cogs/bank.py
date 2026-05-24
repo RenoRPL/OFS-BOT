@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.google_auth import open_spreadsheet
+from utils.google_auth import open_spreadsheet, open_worksheet
 
 # ----------------------------
 # Sheets / tabs
@@ -774,6 +774,11 @@ class BankCog(commands.Cog):
             return entry.value
         return None
 
+    def _get_cached_stale(self, key: str) -> Optional[Any]:
+        """Return a cached value even after TTL expiry for quota-failure display fallback."""
+        entry = self._cache.get(key)
+        return entry.value if entry is not None else None
+
     def _set_cached(self, key: str, value: Any, ttl: float = CACHE_TTL_SECONDS) -> None:
         self._cache[key] = CacheEntry(value, ttl)
 
@@ -796,12 +801,10 @@ class BankCog(commands.Cog):
         return self.sheet
 
     def _ws(self, name: str):
+        """Open a worksheet through the shared Google helper so tab objects are cached."""
         if not self._ensure_sheet():
             return None
-        try:
-            return self.sheet.worksheet(name)
-        except Exception:
-            return None
+        return open_worksheet(name)
 
     def _find_header_index(self, headers: List[str], name: str) -> int:
         name_l = name.strip().lower()
@@ -1505,6 +1508,10 @@ class BankCog(commands.Cog):
         )
         if ok:
             self._set_cached(cache_key, result, ttl=30)
+        elif fallback is None:
+            stale = self._get_cached_stale(cache_key)
+            if stale is not None:
+                return stale, False
         return result, ok
 
     def _get_value_by_header(self, headers: List[str], row: List[str], header_name: str) -> str:
@@ -2093,6 +2100,7 @@ class BankView(discord.ui.View):
         self._cached_conversion_rates: Optional[Dict[Tuple[str, str], int]] = None
         self._cached_is_eligible: bool = True
         self._cached_ineligible_reason: str = ""
+        self._wallet_read_ok: bool = True
 
         self._pay_data_loaded = False
         self._ledger_unavailable = False
@@ -2277,7 +2285,10 @@ class BankView(discord.ui.View):
     # ----------------------------
     async def _load_balance_data(self) -> None:
         wallet, ok = await self.cog.fetch_wallet_only(self.member.id, fallback=self._cached_wallet)
+        self._wallet_read_ok = ok
         if ok:
+            self._cached_wallet = wallet
+        elif wallet:
             self._cached_wallet = wallet
 
     async def _load_pay_data(self) -> None:
@@ -2323,6 +2334,16 @@ class BankView(discord.ui.View):
             f"{c_emoji} **Copper:** {wallet.get('copper', 0):,}"
         )
         embed.add_field(name="Your Wallet", value=wallet_display, inline=False)
+        if not self._wallet_read_ok:
+            embed.add_field(
+                name="⚠️ Treasury Read Delayed",
+                value=(
+                    "Google Sheets is rate-limiting the treasury right now. "
+                    "If a last-known balance was available, it is shown above; "
+                    "otherwise your balance has **not** been changed and should be retried shortly."
+                ),
+                inline=False,
+            )
 
     def _add_sources_content(self, embed: discord.Embed) -> None:
         wallet = self._cached_wallet or {"gold": 0, "silver": 0, "copper": 0}
@@ -2682,9 +2703,23 @@ class BankView(discord.ui.View):
                         pass
                     return
 
+                fresh_wallet, wallet_ok = await self.cog.fetch_wallet_only(self.member.id, fallback=None)
+                if not wallet_ok:
+                    self._is_collecting = False
+                    self._enable_all_buttons()
+                    self._update_button_styles()
+                    embed = self.build_error_embed(
+                        "Treasury read is currently rate-limited. Pay was not collected; try again shortly."
+                    )
+                    try:
+                        await interaction.edit_original_response(embed=embed, view=self)
+                    except discord.HTTPException:
+                        pass
+                    return
+
                 new_wallet = await self.cog.apply_collect_pay(
                     self.member.id, payouts, breakdown, snapshot_plan,
-                    cached_wallet, rates
+                    fresh_wallet, rates
                 )
 
                 self._cached_wallet = new_wallet
