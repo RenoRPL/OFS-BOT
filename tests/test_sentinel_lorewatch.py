@@ -1,9 +1,13 @@
+from datetime import timezone
+
 from cogs.sentinel_lorewatch import (
     LORE_HEADER_ALIASES,
+    _default_april_backfill_start,
     _find_duplicate_lore,
     _header_map,
     _is_probably_substantial_lore,
     _lore_fingerprint,
+    _parse_backfill_since,
 )
 
 
@@ -70,3 +74,23 @@ def test_short_chatter_without_attachments_is_not_substantial_lore():
         "The chronicle records the banners crossing into the dark, carrying the Fallen Star forward.",
         [],
     ) is True
+
+
+def test_parse_backfill_since_accepts_april_date_as_utc_start_of_day():
+    parsed = _parse_backfill_since("2026-04-01")
+
+    assert parsed.year == 2026
+    assert parsed.month == 4
+    assert parsed.day == 1
+    assert parsed.hour == 0
+    assert parsed.tzinfo == timezone.utc
+
+
+def test_default_april_backfill_start_uses_current_year():
+    default_start = _default_april_backfill_start()
+
+    assert default_start.month == 4
+    assert default_start.day == 1
+    assert default_start.hour == 0
+    assert default_start.minute == 0
+    assert default_start.tzinfo == timezone.utc

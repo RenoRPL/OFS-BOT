@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 print("=== LOADED sentinel_lorewatch.py (The Sentinel Lorewatch) ===")
@@ -30,6 +31,8 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1YW5A_gk5WwmKbwxqrhIut3JUBSjaTO8vE
 LORE_INTAKE_TAB = os.getenv("LORE_INTAKE_TAB", "Lore Intake").strip() or "Lore Intake"
 LORE_CAPTURE_REACTION = os.getenv("LORE_CAPTURE_REACTION", "📜") or "📜"
 MAX_LORE_TEXT_CHARS = 5000
+DEFAULT_BACKFILL_LIMIT = int(os.getenv("LORE_BACKFILL_LIMIT", "500") or "500")
+MAX_BACKFILL_LIMIT = int(os.getenv("LORE_BACKFILL_MAX_LIMIT", "1000") or "1000")
 
 LORE_HEADER_ALIASES: Dict[str, List[str]] = {
     "lore_id": ["Lore ID", "ID", "Ticket ID"],
@@ -64,6 +67,22 @@ def _now_utc() -> datetime:
 
 def _now_iso() -> str:
     return _now_utc().isoformat(timespec="seconds")
+
+
+def _default_april_backfill_start() -> datetime:
+    now = _now_utc()
+    return datetime(now.year, 4, 1, tzinfo=timezone.utc)
+
+
+def _parse_backfill_since(value: Optional[str]) -> datetime:
+    raw = (value or "").strip()
+    if not raw:
+        return _default_april_backfill_start()
+    try:
+        # Slash command input is intentionally simple: YYYY-MM-DD.
+        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError("Use date format YYYY-MM-DD, for example 2026-04-01.") from exc
 
 
 def _norm_header(value: str) -> str:
@@ -292,15 +311,15 @@ class SentinelLorewatch(commands.Cog):
             print(f"[Lorewatch] Failed to create lore thread for {lore_id}: {e}")
         return admin_msg, thread
 
-    async def _capture_lore_message(self, message: discord.Message) -> None:
+    async def _capture_lore_message(self, message: discord.Message, *, backfill: bool = False) -> str:
         text = _clean_lore_text(message.content or "")
         attachment_urls = [a.url for a in message.attachments]
         if not _is_probably_substantial_lore(text, attachment_urls):
-            return
+            return "ignored"
 
         async with self._capture_lock:
             if message.id in self._recent_message_ids:
-                return
+                return "recent_duplicate"
             self._recent_message_ids.add(message.id)
             if len(self._recent_message_ids) > 500:
                 self._recent_message_ids = set(list(self._recent_message_ids)[-250:])
@@ -319,7 +338,7 @@ class SentinelLorewatch(commands.Cog):
                 except Exception:
                     pass
                 print(f"[Lorewatch] Skipped duplicate lore message {message.id}: {duplicate}")
-                return
+                return "duplicate"
 
             lore_id = await self._generate_lore_id(rows, hmap)
             area, placement = _infer_suggested_area(text, attachment_urls)
@@ -359,6 +378,79 @@ class SentinelLorewatch(commands.Cog):
         except Exception as e:
             print(f"[Lorewatch] Failed to react to captured lore {message.id}: {e}")
         print(f"[Lorewatch] Captured lore {lore_id} from message {message.id}")
+        return "captured"
+
+    async def _user_can_run_backfill(self, interaction: discord.Interaction) -> bool:
+        user = interaction.user
+        if int(getattr(user, "id", 0)) == PRIMARY_APPROVER_ID:
+            return True
+        if isinstance(user, discord.Member):
+            perms = user.guild_permissions
+            return bool(perms.administrator or perms.manage_guild)
+        return False
+
+    async def _backfill_chronicles(self, *, since: datetime, limit: int) -> Dict[str, int]:
+        channel = self.bot.get_channel(CHRONICLES_CHANNEL_ID)
+        if channel is None:
+            channel = await self.bot.fetch_channel(CHRONICLES_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            raise RuntimeError("Chronicles channel is not a text channel")
+
+        counts = {"scanned": 0, "captured": 0, "duplicate": 0, "ignored": 0, "errors": 0}
+        async for message in channel.history(limit=limit, after=since, oldest_first=True):
+            if message.author.bot:
+                continue
+            counts["scanned"] += 1
+            try:
+                outcome = await self._capture_lore_message(message, backfill=True)
+            except Exception as e:
+                counts["errors"] += 1
+                print(f"[Lorewatch] Backfill failed for message {message.id}: {e}")
+                continue
+            if outcome == "captured":
+                counts["captured"] += 1
+            elif outcome in {"duplicate", "recent_duplicate"}:
+                counts["duplicate"] += 1
+            else:
+                counts["ignored"] += 1
+        return counts
+
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.command(name="lore_backfill", description="Backfill Chronicles lore posts into Lore Intake review tickets.")
+    @app_commands.describe(
+        since="Start date in YYYY-MM-DD format. Defaults to April 1 of the current year.",
+        limit="Maximum messages to scan, newest cap 1000. Default 500.",
+    )
+    async def lore_backfill(self, interaction: discord.Interaction, since: Optional[str] = None, limit: Optional[int] = None):
+        if not await self._user_can_run_backfill(interaction):
+            await interaction.response.send_message("Only authorized admins can run Lorewatch backfill.", ephemeral=True)
+            return
+        try:
+            since_dt = _parse_backfill_since(since)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        max_messages = max(1, min(int(limit or DEFAULT_BACKFILL_LIMIT), MAX_BACKFILL_LIMIT))
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            counts = await self._backfill_chronicles(since=since_dt, limit=max_messages)
+        except Exception as e:
+            print(f"[Lorewatch] Backfill command failed: {e}")
+            await interaction.followup.send(f"Lorewatch backfill failed: `{e}`", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "Lorewatch backfill complete.\n"
+            f"Since: `{since_dt.date().isoformat()}`\n"
+            f"Scanned: **{counts['scanned']}**\n"
+            f"Captured: **{counts['captured']}**\n"
+            f"Duplicates skipped: **{counts['duplicate']}**\n"
+            f"Ignored as non-lore/short chatter: **{counts['ignored']}**\n"
+            f"Errors: **{counts['errors']}**\n\n"
+            f"Captured entries were sent to <#{ADMIN_REPORT_CHANNEL_ID}> for Oracle/admin approval.",
+            ephemeral=True,
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
