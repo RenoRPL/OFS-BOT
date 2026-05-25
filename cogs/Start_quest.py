@@ -3366,10 +3366,15 @@ class QuestCancelConfirmView(discord.ui.View):
     @discord.ui.button(label="Yes, Cancel Quest", style=discord.ButtonStyle.danger, emoji="✅")
     async def confirm_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            # Acknowledge immediately before slow Google Sheets and Discord tag work.
+            # Without this defer, Discord can show "interaction failed" even when the
+            # backend cancellation eventually succeeds.
+            await interaction.response.defer(ephemeral=True)
+
             # Update the quest in the Patrols sheet with cancellation info
             worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
             if not worksheet:
-                await interaction.response.edit_message(content="❌ Failed to access quest database.", embed=None, view=None)
+                await interaction.edit_original_response(content="❌ Failed to access quest database.", embed=None, view=None)
                 return
             
             # Find the quest row
@@ -3395,13 +3400,13 @@ class QuestCancelConfirmView(discord.ui.View):
                 # Update the forum thread with Quest Cancelled tag
                 await self.update_forum_thread_with_cancelled_tag(interaction)
                 
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content=f"❌ Quest **{self.join_quest_view.patrol_name}** has been cancelled successfully.",
                     embed=None,
                     view=None
                 )
             else:
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content="❌ Quest not found in database.",
                     embed=None,
                     view=None
@@ -3409,11 +3414,21 @@ class QuestCancelConfirmView(discord.ui.View):
                 
         except Exception as e:
             print(f"Error cancelling quest: {e}")
-            await interaction.response.edit_message(
-                content=f"❌ Error cancelling quest: {e}",
-                embed=None,
-                view=None
-            )
+            try:
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(
+                        content=f"❌ Error cancelling quest: {e}",
+                        embed=None,
+                        view=None
+                    )
+                else:
+                    await interaction.response.edit_message(
+                        content=f"❌ Error cancelling quest: {e}",
+                        embed=None,
+                        view=None
+                    )
+            except Exception as response_error:
+                print(f"❌ Failed to report quest cancellation error to user: {response_error}")
     
     async def update_forum_thread_with_cancelled_tag(self, interaction: discord.Interaction):
         try:
