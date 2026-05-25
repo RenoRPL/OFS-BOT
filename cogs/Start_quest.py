@@ -1838,12 +1838,12 @@ class JoinQuestView(discord.ui.View):
 
 class ActiveQuestManageView(discord.ui.View):
     def __init__(self, join_quest_view: "JoinQuestView"):
-        super().__init__(timeout=60)
+        super().__init__(timeout=900)
         self.join_quest_view = join_quest_view
 
         # The visible quest-management menu is intentionally restricted to two actions:
         # 1) Complete Quest -> opens the website editor/completion flow.
-        # 2) Cancel Quest -> keeps the existing Discord cancellation flow.
+        # 2) Cancel Quest -> opens the destructive dismissal confirmation flow.
         # Decorated legacy management buttons remain below for reference/internal reuse, but are
         # removed from this view so leaders only see the approved two-button interface.
         self.clear_items()
@@ -1859,7 +1859,8 @@ class ActiveQuestManageView(discord.ui.View):
         cancel_button = discord.ui.Button(
             label="Cancel Quest",
             style=discord.ButtonStyle.danger,
-            emoji="❌"
+            emoji="❌",
+            custom_id=f"cancel_quest_{self.join_quest_view.patrol_id}"
         )
 
         async def cancel_callback(interaction: discord.Interaction):
@@ -2349,27 +2350,41 @@ class ActiveQuestManageView(discord.ui.View):
     
     @discord.ui.button(label="Cancel Quest", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_quest(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Create confirmation view
-        confirm_view = QuestCancelConfirmView(self.join_quest_view)
-        
-        # Create confirmation embed
-        confirm_embed = discord.Embed(
-            title="⚠️ Cancel Quest",
-            description=f"Are you sure you want to cancel **{self.join_quest_view.patrol_name}**?",
-            color=0xff0000
-        )
-        confirm_embed.add_field(
-            name="What happens when cancelled:",
-            value="• Quest will be marked as 'Quest Cancelled'\n• Cancellation timestamp will be recorded\n• Participants will see the quest is cancelled",
-            inline=False
-        )
-        confirm_embed.add_field(
-            name="⚠️ Warning",
-            value="This action cannot be undone!",
-            inline=False
-        )
-        
-        await interaction.response.edit_message(embed=confirm_embed, view=confirm_view)
+        try:
+            # Acknowledge immediately; even the confirmation edit can fail if the
+            # ephemeral management card has sat open for a while.
+            await interaction.response.defer(ephemeral=True)
+
+            # Create confirmation view
+            confirm_view = QuestCancelConfirmView(self.join_quest_view)
+            
+            # Create confirmation embed
+            confirm_embed = discord.Embed(
+                title="⚠️ Dismiss Quest",
+                description=f"Are you sure you want to dismiss **{self.join_quest_view.patrol_name}**?",
+                color=0xff0000
+            )
+            confirm_embed.add_field(
+                name="What happens when dismissed:",
+                value="• All matching Patrols sheet rows for this quest will be deleted\n• The Discord forum thread will be deleted\n• The quest will be removed as if it was never started",
+                inline=False
+            )
+            confirm_embed.add_field(
+                name="⚠️ Warning",
+                value="This action cannot be undone!",
+                inline=False
+            )
+            
+            await interaction.edit_original_response(embed=confirm_embed, view=confirm_view)
+        except Exception as e:
+            print(f"Error opening quest dismissal confirmation: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(content=f"❌ Error opening dismissal confirmation: {e}", embed=None, view=None)
+                else:
+                    await interaction.response.send_message(f"❌ Error opening dismissal confirmation: {e}", ephemeral=True)
+            except Exception as response_error:
+                print(f"❌ Failed to report quest dismissal confirmation error: {response_error}")
 
     async def show_quest_points_interface(self, interaction: discord.Interaction):
         """Show the quest points recording interface"""
@@ -3360,120 +3375,104 @@ class QuestCompleteConfirmView(discord.ui.View):
 
 class QuestCancelConfirmView(discord.ui.View):
     def __init__(self, join_quest_view: "JoinQuestView"):
-        super().__init__(timeout=30)
+        super().__init__(timeout=120)
         self.join_quest_view = join_quest_view
     
-    @discord.ui.button(label="Yes, Cancel Quest", style=discord.ButtonStyle.danger, emoji="✅")
+    @discord.ui.button(label="Yes, Dismiss Quest", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def confirm_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # Acknowledge immediately before slow Google Sheets and Discord tag work.
-            # Without this defer, Discord can show "interaction failed" even when the
-            # backend cancellation eventually succeeds.
+            # Acknowledge immediately before slow Google Sheets and Discord thread work.
             await interaction.response.defer(ephemeral=True)
 
-            # Update the quest in the Patrols sheet with cancellation info
             worksheet = await self.join_quest_view.quest_cog.get_worksheet_cached("Patrols")
             if not worksheet:
                 await interaction.edit_original_response(content="❌ Failed to access quest database.", embed=None, view=None)
                 return
             
-            # Find the quest row
             all_values = await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.get_all_values)
-            quest_row_index = None
+            patrol_id = self.join_quest_view.patrol_id
+            matching_rows = []
+            thread_id = None
             
-            for i, row in enumerate(all_values):
-                if len(row) > 0 and row[0] == self.join_quest_view.patrol_id:
-                    quest_row_index = i + 1  # +1 because sheet rows are 1-indexed
-                    break
+            for row_number, row in enumerate(all_values[1:], start=2):
+                if len(row) > 0 and row[0] == patrol_id:
+                    matching_rows.append(row_number)
+                    if not thread_id and len(row) > 19 and row[19]:
+                        thread_id = row[19]
             
-            if quest_row_index:
-                # Update column AD (Quest Cancelled) with timestamp
-                cancellation_timestamp = datetime.now().isoformat()
-                
-                # Column AD is the 30th column (A=1, B=2, ..., AD=30)
-                await self.join_quest_view.quest_cog.rate_limited_api_call(
-                    worksheet.update_cell, quest_row_index, 30, cancellation_timestamp
-                )
-                
-                print(f"✅ Quest {self.join_quest_view.patrol_id} cancelled at {cancellation_timestamp}")
-                
-                # Update the forum thread with Quest Cancelled tag
-                await self.update_forum_thread_with_cancelled_tag(interaction)
-                
-                await interaction.edit_original_response(
-                    content=f"❌ Quest **{self.join_quest_view.patrol_name}** has been cancelled successfully.",
-                    embed=None,
-                    view=None
-                )
-            else:
+            if not matching_rows:
                 await interaction.edit_original_response(
                     content="❌ Quest not found in database.",
                     embed=None,
                     view=None
                 )
+                return
+
+            # Resolve the thread before deleting sheet rows so we still have a fallback
+            # from the current interaction channel if the stored Thread ID is missing.
+            thread = None
+            if thread_id:
+                thread = await self.join_quest_view.quest_cog._fetch_quest_thread(thread_id)
+            if not thread and isinstance(interaction.channel, discord.Thread):
+                thread = interaction.channel
+
+            deleted_count = 0
+            for row_number in reversed(matching_rows):
+                await self.join_quest_view.quest_cog.rate_limited_api_call(worksheet.delete_rows, row_number)
+                deleted_count += 1
+
+            self.join_quest_view.quest_cog.clear_cache("data_Patrols")
+            print(f"✅ Dismissed quest {patrol_id}; deleted {deleted_count} Patrols rows")
+
+            await interaction.edit_original_response(
+                content=(
+                    f"🗑️ Quest **{self.join_quest_view.patrol_name}** dismissed. "
+                    f"Deleted {deleted_count} sheet row(s). Deleting forum thread..."
+                ),
+                embed=None,
+                view=None
+            )
+
+            if thread:
+                try:
+                    await thread.delete(reason=f"Quest dismissed by {interaction.user} ({interaction.user.id})")
+                    print(f"✅ Deleted dismissed quest thread {thread.id} for {patrol_id}")
+                except Exception as thread_error:
+                    print(f"❌ Failed to delete dismissed quest thread for {patrol_id}: {thread_error}")
+                    try:
+                        await interaction.followup.send(
+                            f"⚠️ Sheet rows were deleted, but I could not delete the forum thread: {thread_error}",
+                            ephemeral=True
+                        )
+                    except Exception:
+                        pass
+            else:
+                print(f"⚠️ No forum thread found to delete for dismissed quest {patrol_id}")
+                try:
+                    await interaction.followup.send(
+                        "⚠️ Sheet rows were deleted, but I could not find the forum thread to delete.",
+                        ephemeral=True
+                    )
+                except Exception:
+                    pass
                 
         except Exception as e:
-            print(f"Error cancelling quest: {e}")
+            print(f"Error dismissing quest: {e}")
             try:
                 if interaction.response.is_done():
                     await interaction.edit_original_response(
-                        content=f"❌ Error cancelling quest: {e}",
+                        content=f"❌ Error dismissing quest: {e}",
                         embed=None,
                         view=None
                     )
                 else:
                     await interaction.response.edit_message(
-                        content=f"❌ Error cancelling quest: {e}",
+                        content=f"❌ Error dismissing quest: {e}",
                         embed=None,
                         view=None
                     )
             except Exception as response_error:
-                print(f"❌ Failed to report quest cancellation error to user: {response_error}")
-    
-    async def update_forum_thread_with_cancelled_tag(self, interaction: discord.Interaction):
-        try:
-            # Get the forum channel and find the Quest Cancelled tag
-            if isinstance(interaction.channel, discord.Thread) and isinstance(interaction.channel.parent, discord.ForumChannel):
-                forum_channel = interaction.channel.parent
-                thread = interaction.channel
-                
-                # Find the Quest Cancelled tag
-                cancelled_tag = None
-                for tag in forum_channel.available_tags:
-                    if tag.name == "Quest Cancelled":
-                        cancelled_tag = tag
-                        break
-                
-                if cancelled_tag:
-                    # Get current tags and add the cancelled tag
-                    current_tags = list(thread.applied_tags)
-                    
-                    # Remove Quest Started and Quest Completed tags if present
-                    quest_started_tag = None
-                    quest_completed_tag = None
-                    for tag in forum_channel.available_tags:
-                        if tag.name == "Quest Started":
-                            quest_started_tag = tag
-                        elif tag.name == "Quest Completed":
-                            quest_completed_tag = tag
-                    
-                    if quest_started_tag in current_tags:
-                        current_tags.remove(quest_started_tag)
-                        print(f"🔄 Removed 'Quest Started' tag from thread {thread.id}")
-                    
-                    if quest_completed_tag in current_tags:
-                        current_tags.remove(quest_completed_tag)
-                        print(f"🔄 Removed 'Quest Completed' tag from thread {thread.id}")
-                    
-                    current_tags.append(cancelled_tag)
-                    
-                    # Apply the updated tags
-                    await thread.edit(applied_tags=current_tags)
-                    print(f"✅ Applied 'Quest Cancelled' tag to thread {thread.id}")
-                else:
-                    print("⚠️ 'Quest Cancelled' tag not found in forum channel")
-        except Exception as e:
-            print(f"Error updating forum thread tags: {e}")
+                print(f"❌ Failed to report quest dismissal error to user: {response_error}")
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel_action(self, interaction: discord.Interaction, button: discord.ui.Button):
