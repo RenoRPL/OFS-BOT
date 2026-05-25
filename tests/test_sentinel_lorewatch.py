@@ -290,3 +290,57 @@ def test_chunk_discord_text_preserves_content_under_discord_message_limit():
     assert len(chunks) > 1
     assert all(len(chunk) <= 1900 for chunk in chunks)
     assert "".join(chunks) == text
+
+
+def test_create_admin_ticket_triggers_oracle_after_full_source_packet(monkeypatch):
+    sent_to_thread = []
+
+    class FakeThread:
+        async def send(self, *, content=None, embed=None, allowed_mentions=None):
+            sent_to_thread.append({"content": content or "", "embed": embed})
+            return SimpleNamespace(id=len(sent_to_thread))
+
+    class FakeAdminMessage:
+        id = 9001
+
+        async def create_thread(self, *, name, auto_archive_duration):
+            return FakeThread()
+
+    class FakeChannel:
+        async def send(self, *, content=None, embed=None):
+            return FakeAdminMessage()
+
+    monkeypatch.setattr(lorewatch.discord, "TextChannel", FakeChannel)
+    cog = SentinelLorewatch(bot=SimpleNamespace(get_channel=lambda channel_id: FakeChannel()))
+    start = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+    messages = [
+        SimpleNamespace(
+            id=501,
+            content="The fleet moved as one Chronicle entry. " + ("context " * 300),
+            created_at=start,
+            guild=SimpleNamespace(id=111),
+            channel=SimpleNamespace(id=222),
+            author=SimpleNamespace(id=7, bot=False),
+            attachments=[],
+        )
+    ]
+
+    asyncio.run(
+        cog._create_admin_ticket(
+            "LORE-20260524-010",
+            messages,
+            "Chronicles / Timeline",
+            "Place after the fleet engagement.",
+            _message_group_text(messages),
+            [],
+        )
+    )
+
+    contents = [entry["content"] for entry in sent_to_thread if entry["content"]]
+    packet_indexes = [i for i, content in enumerate(contents) if content.startswith("FULL LORE SOURCE PACKET")]
+    oracle_indexes = [i for i, content in enumerate(contents) if _oracle_mention() in content]
+
+    assert packet_indexes
+    assert oracle_indexes == [len(contents) - 1]
+    assert max(packet_indexes) < oracle_indexes[0]
+    assert "SOURCE PACKET COMPLETE" in contents[oracle_indexes[0]]

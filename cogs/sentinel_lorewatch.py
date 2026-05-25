@@ -565,7 +565,7 @@ class SentinelLorewatch(commands.Cog):
         embed = discord.Embed(
             title=f"Oracle Lore Workbench — {lore_id}",
             description=(
-                f"{_oracle_mention()} Lore review requested.\n\n"
+                "Lore review requested.\n\n"
                 "Determine where this belongs in the Codex / Timeline / Chronicles, draft the site-ready update, "
                 "and wait for human approval before publishing."
             ),
@@ -603,10 +603,6 @@ class SentinelLorewatch(commands.Cog):
         thread = None
         try:
             thread = await admin_msg.create_thread(name=f"⬜ {lore_id} — Lore Review", auto_archive_duration=10080)
-            await thread.send(
-                content=_oracle_handoff_message(lore_id, message, area, placement, text, attachment_urls),
-                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-            )
             source_packet = _build_lore_source_packet(lore_id, messages, area, placement)
             packet_chunks = _chunk_discord_text(source_packet, limit=1750)
             for index, chunk in enumerate(packet_chunks, start=1):
@@ -615,6 +611,13 @@ class SentinelLorewatch(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             await thread.send(embed=self._build_workspace_embed(lore_id, area, placement))
+            await thread.send(
+                content=(
+                    "SOURCE PACKET COMPLETE — Oracle may now review the full context above.\n\n"
+                    f"{_oracle_handoff_message(lore_id, message, area, placement, text, attachment_urls)}"
+                ),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
         except Exception as e:
             print(f"[Lorewatch] Failed to create lore thread for {lore_id}: {e}")
         return admin_msg, thread
