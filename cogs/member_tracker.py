@@ -20,6 +20,7 @@ class MemberTracker(commands.Cog):
 
         # Read ENV to check if we're in staging
         self.env = os.getenv("ENV", "production").strip().lower()
+        self.target_guild_id = int(os.getenv("OFS_MEMBER_SCAN_GUILD_ID", "1385700546434039928"))
 
         # Start the periodic task ONLY if not in staging mode
         if self.env != "staging":
@@ -116,14 +117,21 @@ class MemberTracker(commands.Cog):
             
             all_member_data = []
             
-            # Scan all guilds
-            for guild in self.bot.guilds:
-                print(f"📊 Scanning guild: {guild.name} ({guild.id})")
-                
-                # Get all members in this guild
-                members = guild.members
-                
-                for member in members:
+            # Scan only the production OFS community guild. The bot may also be in
+            # test/staging Discord servers with duplicate role names but different
+            # role IDs; those must not contaminate the production Discord Member Log.
+            guild = self.bot.get_guild(self.target_guild_id)
+            if guild is None:
+                print(f"❌ Target guild {self.target_guild_id} not found. Available guilds: "
+                      f"{[(g.name, g.id) for g in self.bot.guilds]}")
+                return
+
+            print(f"📊 Scanning target guild: {guild.name} ({guild.id})")
+            
+            # Get all members in the target guild
+            members = guild.members
+            
+            for member in members:
                     try:
                         # Get member roles (excluding @everyone). Keep both display names and
                         # stable Discord role IDs so Sheets/App Script can resolve mutable
@@ -303,20 +311,25 @@ class MemberTracker(commands.Cog):
             total_bots = 0
             guild_stats = []
             
-            for guild in self.bot.guilds:
-                members = len(guild.members)
-                bots = len([m for m in guild.members if m.bot])
-                humans = members - bots
-                
-                guild_stats.append({
-                    'name': guild.name,
-                    'total': members,
-                    'humans': humans,
-                    'bots': bots
-                })
-                
-                total_members += members
-                total_bots += bots
+            guild = self.bot.get_guild(self.target_guild_id)
+            if guild is None:
+                await ctx.send(f"❌ Target guild {self.target_guild_id} not found. The member scanner is scoped to the production OFS guild.")
+                return
+
+            members = len(guild.members)
+            bots = len([m for m in guild.members if m.bot])
+            humans = members - bots
+            
+            guild_stats.append({
+                'name': guild.name,
+                'id': guild.id,
+                'total': members,
+                'humans': humans,
+                'bots': bots
+            })
+            
+            total_members += members
+            total_bots += bots
             
             embed = discord.Embed(
                 title="📊 Member Statistics",
@@ -329,14 +342,14 @@ class MemberTracker(commands.Cog):
                 value=f"**Total Members:** {total_members}\n"
                       f"**Humans:** {total_members - total_bots}\n"
                       f"**Bots:** {total_bots}\n"
-                      f"**Guilds:** {len(self.bot.guilds)}",
+                      f"**Scanner Guild:** {self.target_guild_id}",
                 inline=False
             )
             
             # Add per-guild stats
             guild_info = ""
             for stats in guild_stats:
-                guild_info += f"**{stats['name']}**\n"
+                guild_info += f"**{stats['name']}** (`{stats['id']}`)\n"
                 guild_info += f"Total: {stats['total']} | Humans: {stats['humans']} | Bots: {stats['bots']}\n\n"
             
             if guild_info:
