@@ -112,7 +112,7 @@ def test_default_april_backfill_start_uses_current_year():
     assert default_start.tzinfo == timezone.utc
 
 
-def test_oracle_handoff_message_mentions_oracle_and_includes_plain_text_lore():
+def test_oracle_handoff_message_mentions_oracle_without_duplicating_lore_body():
     message = SimpleNamespace(
         id=999,
         guild=SimpleNamespace(id=111),
@@ -137,7 +137,9 @@ def test_oracle_handoff_message_mentions_oracle_and_includes_plain_text_lore():
     assert "https://discord.com/channels/111/222/999" in handoff
     assert "Chronicles / Timeline" in handoff
     assert "Place in the April campaign sequence." in handoff
-    assert lore_text in handoff
+    assert "Read the full lore source packet above" in handoff
+    assert "Original Lore:" not in handoff
+    assert lore_text not in handoff
     assert attachment_urls[0] in handoff
     assert "Canon Conflicts / Duplicate Risk" in handoff
 

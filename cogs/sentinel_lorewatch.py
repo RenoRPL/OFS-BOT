@@ -177,9 +177,8 @@ def _oracle_handoff_message(
     *,
     limit: int = 1900,
 ) -> str:
-    """Build a plain-text Oracle handoff so Hermes can read more than embeds."""
+    """Build the final Oracle trigger after the full source packet is posted."""
     attachments = "\n".join(attachment_urls) if attachment_urls else "None"
-    lore_text = text or "[No text supplied; review attachment(s) and source post.]"
     handoff = (
         f"{_oracle_mention()}\n\n"
         "ORACLE LORE REVIEW REQUEST\n"
@@ -190,8 +189,8 @@ def _oracle_handoff_message(
         f"{area}\n\n"
         "Placement Hint:\n"
         f"{placement}\n\n"
-        "Original Lore:\n"
-        f"{lore_text}\n\n"
+        "Source Context:\n"
+        "Read the full lore source packet above in this thread. Do not rely on this trigger message for the lore body.\n\n"
         "Attachments:\n"
         f"{attachments}\n\n"
         "Required Output:\n"
