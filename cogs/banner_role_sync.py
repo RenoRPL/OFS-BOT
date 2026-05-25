@@ -137,6 +137,8 @@ class BannerRoleSync(commands.Cog):
             return False, f"Bot lacks Manage Roles in {guild.name}"
         if role.managed:
             return False, f"Role is managed/integration-owned: {role.name}"
+        if (role.name or "").strip().lower() == new_name.lower():
+            return True, f"Role already named target: {new_name}"
         if role >= me.top_role:
             return False, f"Role hierarchy blocked: bot top role must be above {role.name}"
         existing = discord.utils.find(lambda r: (r.name or "").strip().lower() == new_name.lower() and r.id != role.id, guild.roles)
@@ -148,7 +150,16 @@ class BannerRoleSync(commands.Cog):
             role.edit(name=new_name, reason=f"OFS banner rename sync: {old_name} -> {new_name}"),
             self.bot.loop,
         )
-        fut.result(timeout=30)
+        try:
+            fut.result(timeout=30)
+        except discord.Forbidden:
+            return False, f"Discord forbids role rename; check Manage Roles and hierarchy for {role.name}"
+        except discord.NotFound:
+            return False, f"Role disappeared before rename: {role_id}"
+        except discord.HTTPException as exc:
+            return False, f"Discord API error while renaming {role.name}: {exc}"
+        except Exception as exc:
+            return False, f"Unexpected role rename error for {role.name}: {exc}"
         return True, f"Renamed role {role_id}: {old_name} -> {new_name}"
 
     def _mark(self, ws, row_num: int, status_idx: int, applied_idx: int, error_idx: int, status: str, message: str):
