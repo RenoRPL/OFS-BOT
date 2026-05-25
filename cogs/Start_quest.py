@@ -1864,7 +1864,7 @@ class ActiveQuestManageView(discord.ui.View):
         )
 
         async def cancel_callback(interaction: discord.Interaction):
-            await self.cancel_quest(interaction, cancel_button)
+            await self._open_cancel_confirmation(interaction, cancel_button)
 
         cancel_button.callback = cancel_callback
         self.add_item(cancel_button)
@@ -2350,6 +2350,9 @@ class ActiveQuestManageView(discord.ui.View):
     
     @discord.ui.button(label="Cancel Quest", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_quest(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_cancel_confirmation(interaction, button)
+
+    async def _open_cancel_confirmation(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             # Acknowledge immediately; even the confirmation edit can fail if the
             # ephemeral management card has sat open for a while.
