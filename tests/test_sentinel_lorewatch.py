@@ -24,6 +24,9 @@ from cogs.sentinel_lorewatch import (
     _parse_backfill_until,
     _build_lore_source_packet,
     _chunk_discord_text,
+    _is_lore_ticket_close_intent,
+    _is_lore_ticket_thread_name,
+    _closed_lore_thread_name,
 )
 
 
@@ -346,3 +349,51 @@ def test_create_admin_ticket_triggers_oracle_after_full_source_packet(monkeypatc
     assert oracle_indexes == [len(contents) - 1]
     assert max(packet_indexes) < oracle_indexes[0]
     assert "SOURCE PACKET COMPLETE" in contents[oracle_indexes[0]]
+
+
+def test_lore_ticket_close_intent_and_thread_name_helpers():
+    assert _is_lore_ticket_close_intent("close this lore ticket") is True
+    assert _is_lore_ticket_close_intent("please close the lore ticket") is True
+    assert _is_lore_ticket_close_intent("close this bug ticket") is False
+    assert _is_lore_ticket_close_intent("this lore ticket looks good") is False
+
+    assert _is_lore_ticket_thread_name("⬜ LORE-20260524-010 — Lore Review") is True
+    assert _is_lore_ticket_thread_name("LORE-20260524-010 — Lore Review") is True
+    assert _is_lore_ticket_thread_name("⬜ BUG-20260524-010 — Bug Review") is False
+
+    assert _closed_lore_thread_name("⬜ LORE-20260524-010 — Lore Review") == "✅ LORE-20260524-010 — Lore Review"
+    assert _closed_lore_thread_name("✅ LORE-20260524-010 — Lore Review") == "✅ LORE-20260524-010 — Lore Review"
+    assert _closed_lore_thread_name("LORE-20260524-010 — Lore Review") == "✅ LORE-20260524-010 — Lore Review"
+
+
+def test_primary_approver_close_lore_ticket_marks_thread_title_and_reacts():
+    class FakeThread:
+        def __init__(self):
+            self.id = 777
+            self.name = "⬜ LORE-20260524-010 — Lore Review"
+            self.edits = []
+
+        async def edit(self, *, name, reason=None):
+            self.edits.append({"name": name, "reason": reason})
+            self.name = name
+
+    class FakeMessage:
+        def __init__(self):
+            self.author = SimpleNamespace(id=PRIMARY_APPROVER_ID, bot=False)
+            self.guild = SimpleNamespace(id=111)
+            self.channel = FakeThread()
+            self.content = "close this lore ticket"
+            self.reactions = []
+
+        async def add_reaction(self, emoji):
+            self.reactions.append(emoji)
+
+    cog = SentinelLorewatch(bot=SimpleNamespace())
+    message = FakeMessage()
+
+    handled = asyncio.run(cog._maybe_close_lore_ticket_thread(message))
+
+    assert handled is True
+    assert message.channel.name == "✅ LORE-20260524-010 — Lore Review"
+    assert message.channel.edits == [{"name": "✅ LORE-20260524-010 — Lore Review", "reason": "Primary approver closed lore ticket"}]
+    assert message.reactions == ["✅"]

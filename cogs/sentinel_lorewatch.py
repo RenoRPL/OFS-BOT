@@ -167,6 +167,23 @@ def _oracle_mention() -> str:
     return f"<@{ORACLE_BOT_USER_ID}>"
 
 
+def _is_lore_ticket_close_intent(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    if "lore ticket" not in normalized:
+        return False
+    return bool(re.search(r"\b(close|closed|complete|completed|resolve|resolved)\b", normalized))
+
+
+def _is_lore_ticket_thread_name(name: str) -> bool:
+    cleaned = re.sub(r"^[✅⬜\s]+", "", (name or "").strip())
+    return bool(re.search(r"\bLORE-\d{8}-\d{3}\b", cleaned, flags=re.IGNORECASE)) and "lore review" in cleaned.lower()
+
+
+def _closed_lore_thread_name(name: str) -> str:
+    cleaned = re.sub(r"^[✅⬜\s]+", "", (name or "").strip())
+    return f"✅ {cleaned}" if cleaned else "✅ Lore Review"
+
+
 def _oracle_handoff_message(
     lore_id: str,
     message: discord.Message,
@@ -908,9 +925,31 @@ class SentinelLorewatch(commands.Cog):
     async def before_lorewatch_daily(self) -> None:
         await self.bot.wait_until_ready()
 
+    async def _maybe_close_lore_ticket_thread(self, message: discord.Message) -> bool:
+        if int(getattr(message.author, "id", 0)) != PRIMARY_APPROVER_ID:
+            return False
+        if not _is_lore_ticket_close_intent(getattr(message, "content", "") or ""):
+            return False
+        channel = message.channel
+        thread_name = getattr(channel, "name", "")
+        if not _is_lore_ticket_thread_name(thread_name):
+            return False
+
+        new_name = _closed_lore_thread_name(thread_name)
+        try:
+            if new_name != thread_name:
+                await channel.edit(name=new_name, reason="Primary approver closed lore ticket")
+            await message.add_reaction("✅")
+            print(f"[Lorewatch] Lore ticket thread closed by primary approver: {thread_name} -> {new_name}")
+        except Exception as e:
+            print(f"[Lorewatch] Failed to mark lore ticket thread closed: {e}")
+        return True
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
+            return
+        if await self._maybe_close_lore_ticket_thread(message):
             return
         if message.channel.id != CHRONICLES_CHANNEL_ID:
             return
