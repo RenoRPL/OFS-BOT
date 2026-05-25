@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import json
 import os
@@ -9,7 +9,7 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from utils.google_auth import open_spreadsheet
 
@@ -3496,11 +3496,25 @@ class StartQuest(commands.Cog):
         self.cache_duration = 300  # 5 minutes cache
         self.last_api_call = 0
         self.api_call_delay = 0.5  # Reduced from 1.0 to 0.5 seconds for faster quest creation
+
+        # Website → Discord quest-completion reconciliation. The public site
+        # writes Patrols AE/Y when a leader sends a quest to review; this bot
+        # mirrors that state back into the Discord forum thread.
+        self.web_completion_sync_file = os.path.join("data", "web_quest_completion_sync.json")
+        self.web_completion_sync_seen = self._load_web_completion_sync_seen()
+        self.web_completion_sync_started_at = datetime.utcnow()
         
         # Register persistent views
         self.register_persistent_views()
 
+        if not self.web_completion_sync_loop.is_running():
+            self.web_completion_sync_loop.start()
+
         print("[OK] Quest system initialized with cache and Google Sheets")
+
+    def cog_unload(self):
+        if self.web_completion_sync_loop.is_running():
+            self.web_completion_sync_loop.cancel()
     
     async def _ensure_sheet(self):
         """Lazy-open spreadsheet on first use (runs in a thread, never blocks event loop)."""
@@ -3599,6 +3613,332 @@ class StartQuest(commands.Cog):
             print(f"✅ Registered persistent views for active quests")
         
         asyncio.create_task(delayed_setup())
+
+    def _load_web_completion_sync_seen(self):
+        """Load local idempotency state for web-completed quest Discord mirrors."""
+        try:
+            if os.path.exists(self.web_completion_sync_file):
+                with open(self.web_completion_sync_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"⚠️ Could not load web quest completion sync state: {e}")
+        return {}
+
+    def _save_web_completion_sync_seen(self):
+        """Persist local idempotency state. Sheet marker is still preferred when present."""
+        try:
+            os.makedirs(os.path.dirname(self.web_completion_sync_file), exist_ok=True)
+            with open(self.web_completion_sync_file, "w", encoding="utf-8") as f:
+                json.dump(self.web_completion_sync_seen, f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"⚠️ Could not save web quest completion sync state: {e}")
+
+    def _header_index(self, headers, *names, fallback=None):
+        normalized = {str(h).strip().lower(): i for i, h in enumerate(headers or [])}
+        for name in names:
+            idx = normalized.get(str(name).strip().lower())
+            if idx is not None:
+                return idx
+        return fallback
+
+    def _cell(self, row, idx, default=""):
+        if idx is None or idx < 0:
+            return default
+        return str(row[idx]).strip() if len(row) > idx and row[idx] is not None else default
+
+    def _parse_sheet_timestamp(self, value):
+        value = str(value or "").strip()
+        if not value:
+            return None
+        for fmt in (None, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                if fmt is None:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+                return datetime.strptime(value.split("+")[0].replace("Z", ""), fmt)
+            except Exception:
+                continue
+        return None
+
+    @tasks.loop(minutes=3)
+    async def web_completion_sync_loop(self):
+        """Mirror website-completed quests into their Discord forum threads.
+
+        The site completion flow writes Patrols AE (Quest Completed) and Y
+        (Sent for review), but it cannot safely use the Discord bot token. This
+        low-frequency reconciliation keeps Discord presentation coherent without
+        adding a Worker/bot webhook yet.
+        """
+        if str(os.getenv("OFS_QUEST_WEB_COMPLETION_SYNC", "1")).lower() in {"0", "false", "no", "off"}:
+            return
+        await self.sync_web_completed_quests()
+
+    @web_completion_sync_loop.before_loop
+    async def before_web_completion_sync_loop(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(10)
+
+    async def sync_web_completed_quests(self):
+        worksheet = await self.get_worksheet_cached("Patrols")
+        if not worksheet:
+            return
+
+        try:
+            values = await self.rate_limited_api_call(worksheet.get_all_values)
+        except Exception as e:
+            print(f"⚠️ Web quest completion sync could not read Patrols: {e}")
+            return
+        if not values or len(values) < 2:
+            return
+
+        headers = values[0]
+        idx = {
+            "patrol": self._header_index(headers, "Patrol ID", fallback=0),
+            "leader_name": self._header_index(headers, "Patrol Leader", fallback=1),
+            "leader_id": self._header_index(headers, "Patrol Leader ID", fallback=2),
+            "leader_rank": self._header_index(headers, "Leader Rank", fallback=3),
+            "name": self._header_index(headers, "Patrol Name", fallback=4),
+            "description": self._header_index(headers, "Patrol Description", fallback=5),
+            "image": self._header_index(headers, "Patrol Image", fallback=6),
+            "player_id": self._header_index(headers, "Player ID", fallback=10),
+            "player_name": self._header_index(headers, "Player Name", fallback=11),
+            "player_banner": self._header_index(headers, "Player Banner", "Player Role", fallback=12),
+            "player_rank": self._header_index(headers, "Player Rank", fallback=13),
+            "quest_points": self._header_index(headers, "Quest", fallback=14),
+            "ground_kills": self._header_index(headers, "Fps kills", fallback=15),
+            "ship_kills": self._header_index(headers, "Ship kills", fallback=16),
+            "thread_id": self._header_index(headers, "Thread ID", fallback=19),
+            "sent_review": self._header_index(headers, "Sent for review", fallback=24),
+            "approved": self._header_index(headers, "Admin Approved", "Admin, Approved", fallback=25),
+            "crusades": self._header_index(headers, "Crusades", fallback=26),
+            "turret_kills": self._header_index(headers, "Grefier", "Turret", fallback=27),
+            "cancelled": self._header_index(headers, "Quest Cancelled", fallback=29),
+            "completed": self._header_index(headers, "Quest Completed", fallback=30),
+            "game": self._header_index(headers, "Game", fallback=31),
+            "type": self._header_index(headers, "Type", "Quest Type", fallback=32),
+            "total_time": self._header_index(headers, "Total time in quest per user", "Total time in quest per user ", fallback=33),
+            "discord_synced": self._header_index(headers, "Discord Completion Synced", "Discord Completion Synced At", fallback=None),
+        }
+
+        grouped = {}
+        for row_number, row in enumerate(values[1:], start=2):
+            patrol_id = self._cell(row, idx["patrol"])
+            if not patrol_id:
+                continue
+            grouped.setdefault(patrol_id, []).append((row_number, row))
+
+        for patrol_id, rows_with_numbers in grouped.items():
+            try:
+                await self._maybe_sync_web_completed_quest(worksheet, patrol_id, rows_with_numbers, idx)
+            except Exception as e:
+                print(f"⚠️ Web quest completion sync failed for {patrol_id}: {e}")
+
+    def _find_leader_row(self, rows_with_numbers, idx):
+        for row_number, row in rows_with_numbers:
+            if not self._cell(row, idx["player_id"]):
+                return row_number, row
+        return rows_with_numbers[0]
+
+    async def _maybe_sync_web_completed_quest(self, worksheet, patrol_id, rows_with_numbers, idx):
+        leader_row_number, leader = self._find_leader_row(rows_with_numbers, idx)
+        completed = self._cell(leader, idx["completed"])
+        sent_review = self._cell(leader, idx["sent_review"])
+        cancelled = self._cell(leader, idx["cancelled"])
+        approved = self._cell(leader, idx["approved"])
+        if not completed or not sent_review or cancelled or approved:
+            return
+
+        # Avoid flooding historical completed quests after the feature is first deployed.
+        completed_at = self._parse_sheet_timestamp(completed)
+        if completed_at and completed_at < (self.web_completion_sync_started_at - timedelta(minutes=15)):
+            return
+        if not completed_at:
+            print(f"⚠️ Web-completed quest {patrol_id} has an unparseable completion timestamp; skipping Discord mirror")
+            return
+
+        sheet_synced = self._cell(leader, idx["discord_synced"]) if idx.get("discord_synced") is not None else ""
+        local_synced = self.web_completion_sync_seen.get(patrol_id)
+        if sheet_synced or local_synced:
+            return
+
+        thread_id = self._first_nonempty(rows_with_numbers, idx["thread_id"])
+        if not thread_id:
+            print(f"⚠️ Web-completed quest {patrol_id} has no Thread ID; cannot mirror to Discord")
+            return
+
+        completion_message = await self._post_web_completion_to_thread(patrol_id, leader, rows_with_numbers, idx, thread_id)
+        await self._send_web_completion_review_embed(patrol_id, leader, rows_with_numbers, idx)
+
+        sync_stamp = datetime.utcnow().isoformat()
+        self.web_completion_sync_seen[patrol_id] = {
+            "synced_at": sync_stamp,
+            "thread_id": str(thread_id),
+            "completion_message_id": str(completion_message.id) if completion_message else "",
+        }
+        self._save_web_completion_sync_seen()
+
+        if idx.get("discord_synced") is not None:
+            col = idx["discord_synced"] + 1
+            try:
+                await self.rate_limited_api_call(worksheet.update_cell, leader_row_number, col, sync_stamp)
+            except Exception as e:
+                print(f"⚠️ Could not write Discord Completion Synced for {patrol_id}: {e}")
+
+    def _first_nonempty(self, rows_with_numbers, idx):
+        for _, row in rows_with_numbers:
+            value = self._cell(row, idx)
+            if value:
+                return value
+        return ""
+
+    async def _fetch_quest_thread(self, thread_id):
+        try:
+            thread_id_int = int(str(thread_id).strip())
+        except (TypeError, ValueError):
+            return None
+
+        channel = self.bot.get_channel(thread_id_int)
+        if channel:
+            return channel
+
+        for guild in self.bot.guilds:
+            settings = self.get_guild_settings(guild.id)
+            forum_channel_id = settings.get("quest_forum_channel")
+            forum = guild.get_channel(forum_channel_id) if forum_channel_id else None
+            if forum and isinstance(forum, discord.ForumChannel):
+                thread = forum.get_thread(thread_id_int)
+                if thread:
+                    return thread
+        try:
+            fetched = await self.bot.fetch_channel(thread_id_int)
+            return fetched if isinstance(fetched, discord.Thread) else None
+        except Exception as e:
+            print(f"⚠️ Could not fetch quest thread {thread_id}: {e}")
+            return None
+
+    async def _post_web_completion_to_thread(self, patrol_id, leader, rows_with_numbers, idx, thread_id):
+        thread = await self._fetch_quest_thread(thread_id)
+        if not thread:
+            print(f"⚠️ Could not find Discord thread {thread_id} for web-completed quest {patrol_id}")
+            return None
+
+        quest_name = self._cell(leader, idx["name"], "Unknown Quest")
+        quest_type = self._cell(leader, idx["type"], "Quest")
+        display_quest_name = f"🏛️ | {quest_name}" if quest_type == "Crusade" else quest_name
+        quest_number = patrol_id.split('-')[-1] if '-' in patrol_id else patrol_id
+        leader_name = self._cell(leader, idx["leader_name"], "Unknown Leader")
+        leader_rank = self._cell(leader, idx["leader_rank"])
+        quest_image = self._cell(leader, idx["image"])
+        quest_url = f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(patrol_id), safe='')}"
+
+        leader_display = f"**Leader:** {leader_name}"
+        if leader_rank:
+            leader_display += f"\n**Rank:** {leader_rank}"
+
+        embed = discord.Embed(
+            title="📜 Quest Completed Successfully!",
+            description=f"**{display_quest_name}** has been completed on the website and sent for admin review.\n\n{leader_display}",
+            color=0x00ff00,
+            url=quest_url,
+        )
+        embed.add_field(name="View Quest / Points", value=f"[Open quest on site]({quest_url})", inline=False)
+        if quest_image and quest_image.startswith(("http://", "https://")):
+            embed.set_image(url=quest_image)
+        embed.set_footer(text=f"✅ Quest Completed via website | ID: {quest_number}")
+
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="View Quest / Points", style=discord.ButtonStyle.link, emoji="📜", url=quest_url))
+        message = await thread.send(embed=embed, view=view)
+        await self._apply_completed_tag_to_thread(thread)
+        print(f"✅ Mirrored website completion for {patrol_id} into thread {thread.id}")
+        return message
+
+    async def _apply_completed_tag_to_thread(self, thread):
+        try:
+            forum = thread.parent
+            if not isinstance(forum, discord.ForumChannel):
+                return
+            completed_tag = None
+            started_tag = None
+            for tag in forum.available_tags:
+                if tag.name == "Quest Completed":
+                    completed_tag = tag
+                elif tag.name == "Quest Started":
+                    started_tag = tag
+            if not completed_tag:
+                print("⚠️ 'Quest Completed' tag not found in forum channel")
+                return
+            current_tags = list(thread.applied_tags) if thread.applied_tags else []
+            if started_tag and started_tag in current_tags:
+                current_tags.remove(started_tag)
+            if completed_tag not in current_tags:
+                current_tags.append(completed_tag)
+            await thread.edit(applied_tags=current_tags)
+            print(f"✅ Applied 'Quest Completed' tag to thread {thread.id}")
+        except Exception as e:
+            print(f"Error applying web-completion forum tag: {e}")
+
+    async def _send_web_completion_review_embed(self, patrol_id, leader, rows_with_numbers, idx):
+        quest_name = self._cell(leader, idx["name"], "Unknown Quest")
+        quest_type = self._cell(leader, idx["type"], "Quest")
+        display_quest_name = f"🏛️ | {quest_name}" if quest_type == "Crusade" else quest_name
+        leader_name = self._cell(leader, idx["leader_name"], "Unknown Leader")
+        leader_rank = self._cell(leader, idx["leader_rank"])
+        quest_image = self._cell(leader, idx["image"])
+        quest_number = patrol_id.split('-')[-1] if '-' in patrol_id else patrol_id
+        quest_url = f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(patrol_id), safe='')}"
+
+        participants = []
+        for _, row in rows_with_numbers:
+            player_id = self._cell(row, idx["player_id"])
+            player_name = self._cell(row, idx["player_name"])
+            if not player_id or not player_name:
+                continue
+            pts = []
+            for key, emoji in (("quest_points", "📜"), ("ground_kills", "🔫"), ("ship_kills", "🚀"), ("crusades", "🏛️"), ("turret_kills", "💀")):
+                val = self._cell(row, idx[key])
+                if val and val != "❓":
+                    pts.append(f"{emoji}{val}")
+            time_text = self._cell(row, idx["total_time"]) or "time pending"
+            participants.append(f"`{len(participants)+1:2}.` <@{player_id}> ⏱️{time_text} | {' '.join(pts) or 'No scoring'}")
+
+        for guild in self.bot.guilds:
+            review_channel_id = self.get_guild_settings(guild.id).get("quest_review_channel")
+            review_channel = self.bot.get_channel(review_channel_id) if review_channel_id else None
+            if not review_channel:
+                continue
+            review_embed = discord.Embed(
+                title="🎯 Quest Results Review",
+                description=f"**{display_quest_name}**\nCompleted from the website and awaiting admin review.\n\n[Open quest on site]({quest_url})",
+                color=0x00ff00,
+                url=quest_url,
+            )
+            review_embed.add_field(name="🎖️ Quest Leader", value=f"**{leader_name}**" + (f"\n{leader_rank}" if leader_rank else ""), inline=True)
+            if participants:
+                chunk = ""
+                field_count = 0
+                for line in participants:
+                    if len(chunk) + len(line) + 1 > 1000:
+                        review_embed.add_field(name="👥 Participant Roster" if field_count == 0 else f"👥 Roster (cont. {field_count+1})", value=chunk.rstrip(), inline=False)
+                        field_count += 1
+                        chunk = ""
+                    chunk += line + "\n"
+                    if field_count >= 20:
+                        chunk += f"*... and {len(participants) - field_count} more participants*"
+                        break
+                if chunk:
+                    review_embed.add_field(name="👥 Participant Roster" if field_count == 0 else f"👥 Roster (cont. {field_count+1})", value=chunk.rstrip(), inline=False)
+            else:
+                review_embed.add_field(name="👥 Participant Roster", value="No participants found", inline=False)
+            if quest_image and quest_image.startswith(("http://", "https://")):
+                review_embed.set_thumbnail(url=quest_image)
+            review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(participants)} participants | Review below")
+            try:
+                await review_channel.send(embed=review_embed, view=QuestReviewView(patrol_id, display_quest_name, self))
+                print(f"✅ Sent web-completed quest {patrol_id} to guild {guild.name} review channel")
+            except discord.HTTPException as e:
+                print(f"❌ Failed to send web-completed review embed for {patrol_id}: {e}")
 
     async def create_roster_embed(self, quest_id: str):
         """Create a roster embed showing all quest members"""
@@ -5617,7 +5957,7 @@ class QuestReviewView(discord.ui.View):
         try:
             await interaction.response.defer(ephemeral=True)
             
-            # Get Thread ID from Google Sheets column S
+            # Get Thread ID from Google Sheets column T
             worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
             if not worksheet:
                 await interaction.followup.send("❌ Unable to access quest database.", ephemeral=True)
@@ -5628,7 +5968,7 @@ class QuestReviewView(discord.ui.View):
             
             for row in all_values:
                 if len(row) > 0 and row[0] == self.patrol_id:
-                    thread_id = row[18] if len(row) > 18 else None  # Column S: Thread ID (row[18] = column S)
+                    thread_id = row[19] if len(row) > 19 else None  # Column T: Thread ID (row[19] = column T)
                     break
             
             if not thread_id or not thread_id.strip():
@@ -5680,7 +6020,7 @@ class QuestReviewView(discord.ui.View):
     async def update_forum_thread_with_recorded_tag(self):
         """Update forum thread tags to add 'Recorded' tag"""
         try:
-            # Get Thread ID from Google Sheets column S
+            # Get Thread ID from Google Sheets column T
             worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
             if not worksheet:
                 print(f"⚠️ Cannot access worksheet for quest {self.patrol_id}")
@@ -5691,7 +6031,7 @@ class QuestReviewView(discord.ui.View):
             
             for row in all_values:
                 if len(row) > 0 and row[0] == self.patrol_id:
-                    thread_id = row[18] if len(row) > 18 else None  # Column S: Thread ID (row[18] = column S)
+                    thread_id = row[19] if len(row) > 19 else None  # Column T: Thread ID (row[19] = column T)
                     break
             
             if not thread_id or not thread_id.strip():
