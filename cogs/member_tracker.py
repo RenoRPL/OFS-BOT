@@ -54,8 +54,8 @@ class MemberTracker(commands.Cog):
                 
                 # Add headers
                 headers = [
-                    "User ID", "Username", "Display Name", "Guild ID", "Guild Name", 
-                    "Roles", "Role Count", "Is Bot", "Account Created", "Joined Guild",
+                    "User ID", "Username", "Display Name", "Guild ID", "Guild Name",
+                    "Roles", "Role IDs", "Role Count", "Is Bot", "Account Created", "Joined Guild",
                     "Avatar URL", "Status", "Last Updated", "Nickname", "Premium Since",
                     "Permissions", "Top Role", "Top Role Color", "Top Role Position", "Mutual Guilds"
                 ]
@@ -107,8 +107,8 @@ class MemberTracker(commands.Cog):
             # Clear existing data (keep headers)
             worksheet.clear()
             headers = [
-                "User ID", "Username", "Display Name", "Guild ID", "Guild Name", 
-                "Roles", "Role Count", "Is Bot", "Account Created", "Joined Guild",
+                "User ID", "Username", "Display Name", "Guild ID", "Guild Name",
+                "Roles", "Role IDs", "Role Count", "Is Bot", "Account Created", "Joined Guild",
                 "Avatar URL", "Status", "Last Updated", "Nickname", "Premium Since",
                 "Permissions", "Top Role", "Top Role Color", "Top Role Position", "Mutual Guilds"
             ]
@@ -125,9 +125,14 @@ class MemberTracker(commands.Cog):
                 
                 for member in members:
                     try:
-                        # Get member roles (excluding @everyone)
-                        roles = [role.name for role in member.roles if role.name != "@everyone"]
-                        roles_str = ", ".join(roles) if roles else "No roles"
+                        # Get member roles (excluding @everyone). Keep both display names and
+                        # stable Discord role IDs so Sheets/App Script can resolve mutable
+                        # banner names by immutable role identity.
+                        member_roles = [role for role in member.roles if role.name != "@everyone"]
+                        role_names = [role.name for role in member_roles]
+                        role_ids = [str(role.id) for role in member_roles]
+                        roles_str = ", ".join(role_names) if role_names else "No roles"
+                        role_ids_str = ", ".join(role_ids) if role_ids else ""
                         
                         # Get top role info
                         top_role = member.top_role
@@ -160,7 +165,8 @@ class MemberTracker(commands.Cog):
                             str(guild.id),  # Guild ID
                             guild.name,  # Guild Name
                             roles_str,  # Roles
-                            len(roles),  # Role Count
+                            role_ids_str,  # Role IDs
+                            len(member_roles),  # Role Count
                             "Yes" if member.bot else "No",  # Is Bot
                             member.created_at.strftime("%Y-%m-%d %H:%M:%S"),  # Account Created
                             member.joined_at.strftime("%Y-%m-%d %H:%M:%S") if member.joined_at else "Unknown",  # Joined Guild
