@@ -1465,83 +1465,11 @@ class JoinQuestView(discord.ui.View):
             # Defer the response - this allows multiple users to join simultaneously
             await interaction.response.defer(ephemeral=True)
             
-            # Look up member data from Member Log tab (outside lock for performance)
-            member_log_worksheet = await self.quest_cog.get_worksheet_cached("Member Log")
-            member_data = {
-                "banner": "Unassigned",
-                "rank": "Member"
-            }
-
-            if member_log_worksheet:
-                try:
-                    member_log_values = await self.quest_cog.rate_limited_api_call(member_log_worksheet.get_all_values)
-                    # Header-based lookup for Banner column
-                    headers = member_log_values[0] if member_log_values else []
-                    banner_col_idx = None
-                    rank_col_idx = None
-                    for idx, header in enumerate(headers):
-                        header_lower = header.strip().lower()
-                        if header_lower == "banner":
-                            banner_col_idx = idx
-                        elif header_lower == "rank":
-                            rank_col_idx = idx
-
-                    # Look for the user's Discord ID in the Member Log
-                    for row in member_log_values[1:]:  # Skip header row
-                        # Check both column A (User ID) and column B (Discord ID) for the user ID
-                        if ((len(row) > 0 and str(interaction.user.id) == str(row[0])) or
-                            (len(row) > 1 and str(interaction.user.id) == str(row[1]))):
-                            if rank_col_idx is not None and len(row) > rank_col_idx:
-                                member_data["rank"] = row[rank_col_idx] if row[rank_col_idx] else "Member"
-                            if banner_col_idx is not None and len(row) > banner_col_idx:
-                                member_data["banner"] = row[banner_col_idx] if row[banner_col_idx] else "Unassigned"
-                            break
-                except Exception as e:
-                    print(f"Error reading Member Log: {e}")
-            
-            # Look up rank icon from Ranks sheet (outside lock for performance)
-            rank_icon_url = None
-            ranks_worksheet = await self.quest_cog.get_worksheet_cached("Ranks")
-            if ranks_worksheet:
-                try:
-                    print(f"🔍 Looking up rank icon for rank: {member_data['rank']}")
-                    ranks_values = await self.quest_cog.rate_limited_api_call(ranks_worksheet.get_all_values)
-                    for row in ranks_values[1:]:  # Skip header row
-                        if len(row) > 0 and row[0] == member_data["rank"]:  # Match rank name in column A
-                            if len(row) > 2 and row[2]:  # Get rank icon from column C (Rank Icon)
-                                rank_icon_url = row[2].strip()  # Remove whitespace
-                                print(f"✅ Found rank icon URL: '{rank_icon_url}'")
-                                
-                                # Validate and convert URL format
-                                if not rank_icon_url.startswith(('http://', 'https://')):
-                                    print(f"⚠️ Invalid URL format - expected http/https URL but got: '{rank_icon_url}'")
-                                    rank_icon_url = None
-                                    break
-                                
-                                # Convert Google Drive share link to direct image URL if needed
-                                if "drive.google.com" in rank_icon_url and "/file/d/" in rank_icon_url:
-                                    try:
-                                        file_id = rank_icon_url.split("/file/d/")[1].split("/")[0]
-                                        rank_icon_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-                                        print(f"📝 Converted to direct link: {rank_icon_url}")
-                                    except Exception as convert_error:
-                                        print(f"❌ Failed to convert Google Drive URL: {convert_error}")
-                                        rank_icon_url = None
-                                        break
-                                
-                                # Final validation
-                                if rank_icon_url and len(rank_icon_url) > 2000:  # Discord URL limit
-                                    print(f"⚠️ URL too long ({len(rank_icon_url)} chars): {rank_icon_url[:100]}...")
-                                    rank_icon_url = None
-                                
-                                break
-                    if not rank_icon_url:
-                        print(f"⚠️ No valid rank icon found for rank: {member_data['rank']}")
-                except Exception as e:
-                    print(f"Error reading Ranks sheet: {e}")
-                    rank_icon_url = None
-            else:
-                print(f"❌ Could not access Ranks worksheet")
+            # Look up member/rank data through cached helpers. These tabs are
+            # relatively static, so do not full-read Member Log and Ranks for
+            # every Join Quest click; that burst pattern trips Sheets 429s.
+            member_data = await self.quest_cog.lookup_member_info(str(interaction.user.id))
+            rank_icon_url = await self.quest_cog.lookup_rank_icon(member_data.get("rank", "Member"))
             
             # Use class-level lock to prevent race conditions when multiple users join simultaneously
             # This critical section includes: checking existence, finding available row, and writing data
@@ -1700,6 +1628,17 @@ class JoinQuestView(discord.ui.View):
                     except Exception as fallback_error:
                         print(f"❌ Fallback also failed: {fallback_error}")
                         raise update_error  # Re-raise original error
+
+                # Keep the in-memory Patrols snapshot aligned with the write so
+                # the roster update below can render without immediately
+                # re-reading the entire Patrols tab.
+                while len(all_values) < next_available_row - 1:
+                    all_values.append([])
+                if len(all_values) >= next_available_row:
+                    all_values[next_available_row - 1] = participant_row_data
+                else:
+                    all_values.append(participant_row_data)
+                self.quest_cog.set_cached_data("data_Patrols", all_values)
             
             # End of critical section - lock is released here
             
@@ -1754,8 +1693,9 @@ class JoinQuestView(discord.ui.View):
             
             await interaction.channel.send(embed=notification_embed)
             
-            # Update the roster embed
-            await self.update_roster_embed()
+            # Update the roster embed using the fresh in-memory Patrols rows
+            # from the join write rather than issuing another full Sheet read.
+            await self.update_roster_embed(all_values_override=all_values)
             
         except Exception as e:
             print(f"Error joining quest: {e}")
@@ -1767,15 +1707,17 @@ class JoinQuestView(discord.ui.View):
             # Always remove user from processing set regardless of success or failure
             self.processing_users.discard(interaction.user.id)
     
-    async def update_roster_embed(self):
+    async def update_roster_embed(self, all_values_override=None):
         """Update the roster embed after someone joins"""
         try:
-            # Get the roster message ID and thread ID from the sheet
-            worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
-            if not worksheet:
-                return
-            
-            all_values = await self.quest_cog.rate_limited_api_call(worksheet.get_all_values)
+            # Reuse a fresh Patrols snapshot when the caller already has one;
+            # otherwise fall back to one Sheet read for legacy callers.
+            all_values = all_values_override
+            if all_values is None:
+                worksheet = await self.quest_cog.get_worksheet_cached("Patrols")
+                if not worksheet:
+                    return
+                all_values = await self.quest_cog.rate_limited_api_call(worksheet.get_all_values)
             roster_message_id = None
             thread_id = None
             
@@ -1800,8 +1742,9 @@ class JoinQuestView(discord.ui.View):
                     try:
                         roster_message = await target_thread.fetch_message(int(roster_message_id))
                         
-                        # Generate updated roster embed
-                        updated_roster_embed = await self.quest_cog.create_roster_embed(self.patrol_id)
+                        # Generate updated roster embed from the same Patrols
+                        # rows used to find the roster/thread IDs.
+                        updated_roster_embed = await self.quest_cog.create_roster_embed_from_values(self.patrol_id, all_values)
                         if updated_roster_embed:
                             await roster_message.edit(embed=updated_roster_embed)
                             print(f"✅ Updated roster for quest {self.patrol_id}")
@@ -3512,7 +3455,11 @@ class StartQuest(commands.Cog):
         self.worksheet_cache_timestamps = {}
         self.cache_duration = 300  # 5 minutes cache
         self.last_api_call = 0
-        self.api_call_delay = 0.5  # Reduced from 1.0 to 0.5 seconds for faster quest creation
+        self._api_call_lock = asyncio.Lock()
+        # Keep this conservative: Google Sheets is shared by quest joins,
+        # bank lookups, site/admin surfaces, and background reconciliation.
+        # Bursty full-tab reads were causing per-user read quota 429s.
+        self.api_call_delay = 1.0
 
         # Website → Discord quest-completion reconciliation. The public site
         # writes Patrols AE/Y when a leader sends a quest to review; this bot
@@ -3963,17 +3910,22 @@ class StartQuest(commands.Cog):
             worksheet = await self.get_worksheet_cached("Patrols")
             if not worksheet:
                 return None
-            
-            # Load Member Log data for batch lookups
-            member_log_worksheet = await self.get_worksheet_cached("Member Log")
-            member_log_values = []
-            if member_log_worksheet:
-                try:
-                    member_log_values = await self.rate_limited_api_call(member_log_worksheet.get_all_values)
-                except Exception as e:
-                    print(f"Could not load Member Log: {e}")
-                
+
             all_values = await self.rate_limited_api_call(worksheet.get_all_values)
+            return await self.create_roster_embed_from_values(quest_id, all_values)
+
+        except Exception as e:
+            print(f"Error creating roster embed: {e}")
+            return None
+
+    async def create_roster_embed_from_values(self, quest_id: str, all_values):
+        """Create a roster embed from already-loaded Patrols values.
+
+        Join Quest already has fresh Patrols rows in memory after writing the
+        participant row. Reusing them prevents an extra full-sheet read for
+        every join while keeping the roster display identical.
+        """
+        try:
             quest_members = []
             quest_name = "Unknown Quest"
             display_quest_name = "Unknown Quest"
@@ -4062,20 +4014,32 @@ class StartQuest(commands.Cog):
             return None
     
     async def rate_limited_api_call(self, func, *args, **kwargs):
-        """Rate limited wrapper for Google Sheets API calls"""
-        current_time = time.time()
-        time_since_last = current_time - self.last_api_call
-        
-        if time_since_last < self.api_call_delay:
-            await asyncio.sleep(self.api_call_delay - time_since_last)
-        
-        try:
-            result = await asyncio.to_thread(func, *args, **kwargs)
-            self.last_api_call = time.time()
-            return result
-        except Exception as e:
-            print(f"❌ Google Sheets API error: {e}")
-            raise e
+        """Serialized, retrying wrapper for Google Sheets API calls."""
+        async with self._api_call_lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_api_call
+
+            if time_since_last < self.api_call_delay:
+                await asyncio.sleep(self.api_call_delay - time_since_last)
+
+            last_error = None
+            for attempt in range(1, 4):
+                try:
+                    result = await asyncio.to_thread(func, *args, **kwargs)
+                    self.last_api_call = time.time()
+                    return result
+                except Exception as e:
+                    last_error = e
+                    err_text = str(e).lower()
+                    is_quota = "429" in err_text or "quota" in err_text or "ratelimit" in err_text
+                    if is_quota and attempt < 3:
+                        delay = min(12.0, 2.0 * attempt)
+                        print(f"❌ Google Sheets API quota error on attempt {attempt}/3: {e}; retrying in {delay:.1f}s")
+                        await asyncio.sleep(delay)
+                        continue
+                    print(f"❌ Google Sheets API error: {e}")
+                    raise e
+            raise last_error
     
     def get_cached_data(self, cache_key: str):
         """Get cached data if valid, otherwise return None"""
@@ -4138,11 +4102,12 @@ class StartQuest(commands.Cog):
         cached_data = self.get_cached_data(cache_key)
         if cached_data is not None:
             return cached_data
+        stale_data = self.data_cache.get(cache_key)
         
         # Fetch fresh data
         worksheet = await self.get_worksheet_cached(worksheet_name)
         if not worksheet:
-            return []
+            return stale_data if stale_data is not None else []
         
         try:
             data = await self.rate_limited_api_call(worksheet.get_all_values)
@@ -4150,6 +4115,9 @@ class StartQuest(commands.Cog):
             return data
         except Exception as e:
             print(f"❌ Failed to get data from {worksheet_name}: {e}")
+            if stale_data is not None:
+                print(f"📋 Using stale cached data for: {cache_key}")
+                return stale_data
             return []
     
     async def lookup_member_info(self, member_id: str):
@@ -4196,6 +4164,41 @@ class StartQuest(commands.Cog):
         default_info = {"rank": "Member", "banner": "Unassigned"}
         self.set_cached_data(cache_key, default_info)
         return default_info
+
+    async def lookup_rank_icon(self, rank_name: str):
+        """Lookup a rank icon URL using cached Ranks data."""
+        rank_name = (rank_name or "Member").strip()
+        cache_key = f"rank_icon_{rank_name.lower()}"
+        cached_icon = self.get_cached_data(cache_key)
+        if cached_icon is not None:
+            return cached_icon or None
+
+        ranks_data = await self.get_worksheet_data_cached("Ranks")
+        rank_icon_url = None
+        for row in ranks_data[1:] if ranks_data else []:
+            if len(row) > 0 and str(row[0]).strip() == rank_name:
+                if len(row) > 2 and row[2]:  # Column C: Rank Icon
+                    rank_icon_url = str(row[2]).strip()
+                break
+
+        if rank_icon_url and not rank_icon_url.startswith(('http://', 'https://')):
+            print(f"⚠️ Invalid rank icon URL for rank {rank_name}: {rank_icon_url}")
+            rank_icon_url = None
+
+        if rank_icon_url and "drive.google.com" in rank_icon_url and "/file/d/" in rank_icon_url:
+            try:
+                file_id = rank_icon_url.split("/file/d/")[1].split("/")[0]
+                rank_icon_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            except Exception as convert_error:
+                print(f"❌ Failed to convert rank icon Google Drive URL: {convert_error}")
+                rank_icon_url = None
+
+        if rank_icon_url and len(rank_icon_url) > 2000:
+            print(f"⚠️ Rank icon URL too long for rank {rank_name}: {rank_icon_url[:100]}...")
+            rank_icon_url = None
+
+        self.set_cached_data(cache_key, rank_icon_url or "")
+        return rank_icon_url
     
     def load_quest_id_counter(self, guild_id: int = None):
         """Load the next quest ID counter for a specific guild or global"""

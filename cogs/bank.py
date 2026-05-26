@@ -44,7 +44,10 @@ PLACEHOLDER_TELLER_IMAGE = "https://i.imgur.com/7VqEOmH.png"
 # ----------------------------
 RETRY_COUNT = 3
 RETRY_BASE_DELAY = 2.0
-CACHE_TTL_SECONDS = 60
+# Static/config tabs do not need minute-by-minute reads. A longer default TTL
+# reduces Sheets read pressure during quest/bank bursts; user-wallet entries
+# still pass shorter explicit TTLs where freshness matters.
+CACHE_TTL_SECONDS = 300
 
 LEDGER_TAIL_ROWS = 200
 DEFAULT_LEDGER_LINES = 8  # permissions sheet can override
@@ -912,13 +915,14 @@ class BankCog(commands.Cog):
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
+        stale = self._get_cached_stale(cache_key)
 
         if not await self._throttle_read():
-            return dict(DEFAULT_CONVERSION_RATES)
+            return stale or dict(DEFAULT_CONVERSION_RATES)
 
         result, ok = await _retry_async_graceful(
             self._read_conversion_table_sync,
-            fallback=dict(DEFAULT_CONVERSION_RATES),
+            fallback=stale or dict(DEFAULT_CONVERSION_RATES),
             operation_name="fetch_conversion_rates",
         )
         if ok:
@@ -986,13 +990,14 @@ class BankCog(commands.Cog):
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
+        stale = self._get_cached_stale(cache_key)
 
         if not await self._throttle_read():
-            return {}
+            return stale or {}
 
         result, ok = await _retry_async_graceful(
             self._read_ranks_tier_map_sync,
-            fallback={},
+            fallback=stale or {},
             operation_name="fetch_ranks_tier_map",
         )
         if ok:
@@ -1269,11 +1274,12 @@ class BankCog(commands.Cog):
         cached = self._get_cached("currency_rules")
         if cached is not None:
             return cached
+        stale = self._get_cached_stale("currency_rules")
         if not await self._throttle_read():
-            return []
+            return stale or []
         result, ok = await _retry_async_graceful(
             self._read_rules_sync,
-            fallback=[],
+            fallback=stale or [],
             operation_name="fetch_rules",
         )
         if ok:
