@@ -48,6 +48,7 @@ RETRY_BASE_DELAY = 2.0
 # reduces Sheets read pressure during quest/bank bursts; user-wallet entries
 # still pass shorter explicit TTLs where freshness matters.
 CACHE_TTL_SECONDS = 300
+CONFIG_CACHE_TTL_SECONDS = 900
 
 LEDGER_TAIL_ROWS = 200
 DEFAULT_LEDGER_LINES = 8  # permissions sheet can override
@@ -788,6 +789,9 @@ class BankCog(commands.Cog):
     def _invalidate_cache(self, key: str) -> None:
         self._cache.pop(key, None)
 
+    def _invalidate_sheet_values_cache(self, sheet_name: str) -> None:
+        self._invalidate_cache(f"sheet_values_{sheet_name}")
+
     def _get_member_best_tier(self, member: discord.Member, tier_map: Dict[str, int]) -> Optional[int]:
         """Return the member's best (lowest number) tier from their Discord roles, or None."""
         best: Optional[int] = None
@@ -808,6 +812,26 @@ class BankCog(commands.Cog):
         if not self._ensure_sheet():
             return None
         return open_worksheet(name)
+
+    def _get_sheet_values_sync(self, sheet_name: str, ttl: float = CONFIG_CACHE_TTL_SECONDS) -> List[List[str]]:
+        """Read a full worksheet with stale fallback on Sheets quota pressure."""
+        cache_key = f"sheet_values_{sheet_name}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+        stale = self._get_cached_stale(cache_key)
+        ws = self._ws(sheet_name)
+        if not ws:
+            return stale or []
+        try:
+            data = ws.get_all_values()
+            self._set_cached(cache_key, data, ttl=ttl)
+            return data
+        except Exception as e:
+            if _is_rate_limit_error(e) and stale is not None:
+                print(f"[BankCog] Sheets quota while reading {sheet_name}; using stale cached rows")
+                return stale
+            raise
 
     def _find_header_index(self, headers: List[str], name: str) -> int:
         name_l = name.strip().lower()
@@ -856,12 +880,8 @@ class BankCog(commands.Cog):
         IDX_TO   = 8   # Column I
         IDX_RATE = 9   # Column J
 
-        ws = self._ws(CURRENCY_SHEET)
-        if not ws:
-            return dict(DEFAULT_CONVERSION_RATES)
-
         try:
-            data = ws.get_all_values()
+            data = self._get_sheet_values_sync(CURRENCY_SHEET)
         except Exception:
             return dict(DEFAULT_CONVERSION_RATES)
 
@@ -942,12 +962,8 @@ class BankCog(commands.Cog):
         Returns dict like {"knight": 5, "baron": 4, "duke": 2, ...}
         Keys are lowercase for case-insensitive matching.
         """
-        ws = self._ws(RANKS_SHEET)
-        if not ws:
-            return {}
-
         try:
-            data = ws.get_all_values()
+            data = self._get_sheet_values_sync(RANKS_SHEET)
         except Exception:
             return {}
 
@@ -1083,11 +1099,7 @@ class BankCog(commands.Cog):
           G (idx 6): How many lines shown on ledger
           H (idx 7): Image Thumbnail or Full
         """
-        ws = self._ws(PERMISSIONS_SHEET)
-        if not ws:
-            return 0, DEFAULT_LEDGER_LINES, ImageMode.THUMBNAIL
-
-        data = ws.get_all_values()
+        data = self._get_sheet_values_sync(PERMISSIONS_SHEET)
         if not data or len(data) < 2:
             return 0, DEFAULT_LEDGER_LINES, ImageMode.THUMBNAIL
 
@@ -1131,10 +1143,7 @@ class BankCog(commands.Cog):
         return result
 
     def _read_npc_image_sync(self) -> str:
-        ws = self._ws(NPC_SHEET)
-        if not ws:
-            return PLACEHOLDER_TELLER_IMAGE
-        data = ws.get_all_values()
+        data = self._get_sheet_values_sync(NPC_SHEET)
         if not data or len(data) < 2:
             return PLACEHOLDER_TELLER_IMAGE
         headers = data[0]
@@ -1173,10 +1182,7 @@ class BankCog(commands.Cog):
         Read currency metadata from Currency tab.
         Also reads the rank multiplier (E) and base rank (F) from row 2.
         """
-        ws = self._ws(CURRENCY_SHEET)
-        if not ws:
-            return {}
-        data = ws.get_all_values()
+        data = self._get_sheet_values_sync(CURRENCY_SHEET)
         if not data or len(data) < 2:
             return {}
 
@@ -1238,10 +1244,7 @@ class BankCog(commands.Cog):
         return result
 
     def _read_rules_sync(self) -> List[Dict[str, Any]]:
-        ws = self._ws(CURRENCY_RULES_SHEET)
-        if not ws:
-            return []
-        data = ws.get_all_values()
+        data = self._get_sheet_values_sync(CURRENCY_RULES_SHEET)
         if not data or len(data) < 2:
             return []
         headers = data[0]
@@ -1458,6 +1461,7 @@ class BankCog(commands.Cog):
         new_row = [""] * len(headers)
         new_row[uid_idx] = str(user_id).strip()
         ws.append_row(new_row, value_input_option="RAW")
+        self._invalidate_sheet_values_cache(PATROLS_PAY_SNAPSHOTS_SHEET)
         self._invalidate_cache("snap_user_row_map")
         user_map = self._get_user_row_map_snap_sync()
         row_idx = user_map.get(normalized_uid)
@@ -1863,6 +1867,7 @@ class BankCog(commands.Cog):
         headers = self._get_bank_headers_sync()
         if not headers:
             ws.append_row(BANK_HEADERS_REQUIRED, value_input_option="RAW")
+            self._invalidate_sheet_values_cache(BANK_SHEET)
             self._invalidate_cache("bank_headers")
             headers = self._get_bank_headers_sync()
         if not headers:
@@ -1885,6 +1890,7 @@ class BankCog(commands.Cog):
                 new_row[ci] = "0"
 
         ws.append_row(new_row, value_input_option="RAW")
+        self._invalidate_sheet_values_cache(BANK_SHEET)
         self._invalidate_cache("bank_user_row_map")
         user_map = self._get_user_row_map_bank_sync()
         row_idx = user_map.get(user_id.strip())
@@ -1954,6 +1960,7 @@ class BankCog(commands.Cog):
             updates.append({"range": f"{_col_to_a1(idx_last)}{row_i}", "values": [[_now_utc_iso()]]})
         if updates:
             ws_bank.batch_update(updates, value_input_option="RAW")
+            self._invalidate_sheet_values_cache(BANK_SHEET)
 
         # Update snapshots in Patrols_Pay_Snapshots (NOT Patrols_User_Totals)
         if snapshot_plan:
@@ -1971,6 +1978,7 @@ class BankCog(commands.Cog):
                             print(f"[BankCog] WARNING: Snapshot column '{snap_col}' not found in Patrols_Pay_Snapshots, skipping write")
                     if snap_updates:
                         ws_snap.batch_update(snap_updates, value_input_option="RAW")
+                        self._invalidate_sheet_values_cache(PATROLS_PAY_SNAPSHOTS_SHEET)
                     self._invalidate_cache("snap_user_row_map")
             except Exception as e:
                 print(f"[BankCog] ERROR writing snapshots to Patrols_Pay_Snapshots: {e}")
@@ -1997,6 +2005,7 @@ class BankCog(commands.Cog):
                 }, ensure_ascii=False),
             ]
             ws_log.append_row(log_row, value_input_option="RAW")
+            self._invalidate_sheet_values_cache(BANK_LOGS_SHEET)
             self._invalidate_cache("log_last_row")
 
         self._invalidate_cache(f"wallet_{user_id}")

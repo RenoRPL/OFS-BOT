@@ -3451,9 +3451,16 @@ class StartQuest(commands.Cog):
         # Sophisticated cache system
         self.data_cache = {}
         self.cache_timestamps = {}
+        self.cache_ttls = {}
         self.worksheet_cache = {}
         self.worksheet_cache_timestamps = {}
-        self.cache_duration = 300  # 5 minutes cache
+        self.cache_duration = 300  # 5 minutes cache for static/config data
+        self.stale_cache_duration = 900  # 15 minute stale fallback during Sheets quota pressure
+        self.worksheet_data_ttls = {
+            "Patrols": 30,
+            "Member Log": 300,
+            "Ranks": 600,
+        }
         self.last_api_call = 0
         self._api_call_lock = asyncio.Lock()
         # Keep this conservative: Google Sheets is shared by quest joins,
@@ -4013,9 +4020,70 @@ class StartQuest(commands.Cog):
             print(f"Error creating roster embed: {e}")
             return None
     
+    def _is_quota_error(self, err) -> bool:
+        err_text = str(err).lower()
+        return "429" in err_text or "quota" in err_text or "ratelimit" in err_text or "rate limit" in err_text
+
+    def _worksheet_title_for_func(self, func) -> str:
+        target = getattr(func, "__self__", None)
+        title = getattr(target, "title", "") or getattr(target, "_properties", {}).get("title", "")
+        return str(title or "").strip()
+
+    def _is_cached_sheet_read(self, func) -> bool:
+        return getattr(func, "__name__", "") == "get_all_values" and bool(self._worksheet_title_for_func(func))
+
+    def _is_sheet_mutation(self, func) -> bool:
+        name = getattr(func, "__name__", "")
+        return name in {
+            "update",
+            "update_cell",
+            "append_row",
+            "append_rows",
+            "delete_rows",
+            "insert_row",
+            "batch_update",
+            "clear",
+        }
+
+    def _worksheet_data_cache_key(self, worksheet_name: str) -> str:
+        return f"data_{worksheet_name}"
+
+    def _get_cache_age(self, cache_key: str) -> float:
+        ts = self.cache_timestamps.get(cache_key)
+        return time.time() - ts if ts else float("inf")
+
+    def _get_cached_stale(self, cache_key: str):
+        if cache_key in self.data_cache and self._get_cache_age(cache_key) < self.stale_cache_duration:
+            return self.data_cache[cache_key]
+        return None
+
+    def _invalidate_worksheet_data_cache(self, worksheet_name: str):
+        if not worksheet_name:
+            return
+        cache_key = self._worksheet_data_cache_key(worksheet_name)
+        if cache_key in self.data_cache:
+            del self.data_cache[cache_key]
+        if cache_key in self.cache_timestamps:
+            del self.cache_timestamps[cache_key]
+        if cache_key in self.cache_ttls:
+            del self.cache_ttls[cache_key]
+
     async def rate_limited_api_call(self, func, *args, **kwargs):
-        """Serialized, retrying wrapper for Google Sheets API calls."""
+        """Serialized, retrying wrapper for Google Sheets API calls with read-cache fallback."""
+        read_cache_key = None
+        worksheet_name = self._worksheet_title_for_func(func)
+        if self._is_cached_sheet_read(func):
+            read_cache_key = self._worksheet_data_cache_key(worksheet_name)
+            cached = self.get_cached_data(read_cache_key)
+            if cached is not None:
+                return cached
+
         async with self._api_call_lock:
+            if read_cache_key:
+                cached = self.get_cached_data(read_cache_key)
+                if cached is not None:
+                    return cached
+
             current_time = time.time()
             time_since_last = current_time - self.last_api_call
 
@@ -4027,11 +4095,20 @@ class StartQuest(commands.Cog):
                 try:
                     result = await asyncio.to_thread(func, *args, **kwargs)
                     self.last_api_call = time.time()
+                    if read_cache_key:
+                        ttl = self.worksheet_data_ttls.get(worksheet_name, self.cache_duration)
+                        self.set_cached_data(read_cache_key, result, ttl=ttl)
+                    elif self._is_sheet_mutation(func):
+                        self._invalidate_worksheet_data_cache(worksheet_name)
                     return result
                 except Exception as e:
                     last_error = e
-                    err_text = str(e).lower()
-                    is_quota = "429" in err_text or "quota" in err_text or "ratelimit" in err_text
+                    is_quota = self._is_quota_error(e)
+                    if is_quota and read_cache_key:
+                        stale = self._get_cached_stale(read_cache_key)
+                        if stale is not None:
+                            print(f"📋 Google Sheets quota error for {worksheet_name}; using stale cached rows ({self._get_cache_age(read_cache_key):.0f}s old)")
+                            return stale
                     if is_quota and attempt < 3:
                         delay = min(12.0, 2.0 * attempt)
                         print(f"❌ Google Sheets API quota error on attempt {attempt}/3: {e}; retrying in {delay:.1f}s")
@@ -4045,15 +4122,20 @@ class StartQuest(commands.Cog):
         """Get cached data if valid, otherwise return None"""
         if cache_key in self.data_cache and cache_key in self.cache_timestamps:
             cache_time = self.cache_timestamps[cache_key]
-            if (time.time() - cache_time) < self.cache_duration:
+            ttl = self.cache_ttls.get(cache_key, self.cache_duration)
+            if (time.time() - cache_time) < ttl:
                 print(f"📋 Using cached data for: {cache_key}")
                 return self.data_cache[cache_key]
         return None
     
-    def set_cached_data(self, cache_key: str, data):
+    def set_cached_data(self, cache_key: str, data, ttl: Optional[float] = None):
         """Store data in cache with timestamp"""
         self.data_cache[cache_key] = data
         self.cache_timestamps[cache_key] = time.time()
+        if ttl is not None:
+            self.cache_ttls[cache_key] = ttl
+        else:
+            self.cache_ttls.pop(cache_key, None)
         print(f"📋 Cached data for: {cache_key}")
     
     def clear_cache(self, pattern: str = None):
@@ -4065,10 +4147,13 @@ class StartQuest(commands.Cog):
                     del self.data_cache[key]
                 if key in self.cache_timestamps:
                     del self.cache_timestamps[key]
+                if key in self.cache_ttls:
+                    del self.cache_ttls[key]
             print(f"📋 Cleared {len(keys_to_remove)} cache entries matching: {pattern}")
         else:
             self.data_cache.clear()
             self.cache_timestamps.clear()
+            self.cache_ttls.clear()
             print("📋 Cleared all cache entries")
     
     async def get_worksheet_cached(self, worksheet_name: str):
