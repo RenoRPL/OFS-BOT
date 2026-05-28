@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import discord
 from discord.ext import commands, tasks
 
-from utils.google_auth import open_worksheet, safe_call
+from utils.google_auth import open_spreadsheet, safe_call
 
 REQUEST_SHEET = "Banner Rename Requests"
 POLL_SECONDS = 60
@@ -46,6 +46,7 @@ class BannerRoleSync(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._processing = False
+        self._missing_sheet_logged = False
         self.banner_role_sync_loop.start()
 
     def cog_unload(self):
@@ -69,11 +70,22 @@ class BannerRoleSync(commands.Cog):
         await asyncio.sleep(10)
 
     def _open_request_sheet(self):
-        ws = open_worksheet(REQUEST_SHEET)
-        if not ws:
-            print(f"[BannerRoleSync] Optional sheet '{REQUEST_SHEET}' not available; skipping.")
+        ss = open_spreadsheet()
+        if not ss:
             return None
-        return ws
+        try:
+            worksheets = safe_call(lambda: ss.worksheets(), label="banner_role_sync_list_worksheets")
+        except Exception as exc:
+            print(f"[BannerRoleSync] Unable to list worksheets; skipping optional banner rename sync: {exc}")
+            return None
+        for ws in worksheets or []:
+            if (getattr(ws, "title", "") or "").strip().lower() == REQUEST_SHEET.lower():
+                self._missing_sheet_logged = False
+                return ws
+        if not self._missing_sheet_logged:
+            print(f"[BannerRoleSync] Optional sheet '{REQUEST_SHEET}' not available; banner rename sync disabled until the tab is added.")
+            self._missing_sheet_logged = True
+        return None
 
     def _ensure_headers(self, ws, values: List[List[str]]) -> Tuple[List[List[str]], Dict[str, int]]:
         if not values:
