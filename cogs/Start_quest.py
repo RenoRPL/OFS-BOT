@@ -3690,14 +3690,14 @@ class StartQuest(commands.Cog):
                 continue
         return None
 
-    @tasks.loop(minutes=3)
+    @tasks.loop(seconds=60)
     async def web_completion_sync_loop(self):
         """Mirror website-completed quests into their Discord forum threads.
 
         The site completion flow writes Patrols AE (Quest Completed) and Y
         (Sent for review), but it cannot safely use the Discord bot token. This
-        low-frequency reconciliation keeps Discord presentation coherent without
-        adding a Worker/bot webhook yet.
+        cache-respecting reconciliation keeps Discord presentation coherent
+        without adding a Worker/bot webhook yet.
         """
         if str(os.getenv("OFS_QUEST_WEB_COMPLETION_SYNC", "1")).lower() in {"0", "false", "no", "off"}:
             return
