@@ -13,6 +13,52 @@ from datetime import datetime, timedelta
 from urllib.parse import quote
 from utils.google_auth import open_spreadsheet
 
+
+def build_quest_site_url(patrol_id: str) -> str:
+    """Return the public site quest/points review URL for a Patrols quest."""
+    return f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(patrol_id), safe='')}"
+
+
+def build_quest_site_review_view(patrol_id: str) -> discord.ui.View:
+    """Review-channel view: site link only, no Discord approve/edit actions."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="Open Quest on Site",
+        style=discord.ButtonStyle.link,
+        emoji="📜",
+        url=build_quest_site_url(patrol_id),
+    ))
+    return view
+
+
+def simplify_quest_review_embed(
+    embed: discord.Embed,
+    patrol_id: str,
+    quest_name: str,
+    leader_info: str,
+    participant_count: int,
+    *,
+    status_text: str = "Submitted for review.",
+) -> discord.Embed:
+    """Keep review embeds compact and make the website the review/edit surface."""
+    quest_number = str(patrol_id).split('-')[-1] if '-' in str(patrol_id) else str(patrol_id)
+    quest_url = build_quest_site_url(patrol_id)
+    participant_label = "participant" if participant_count == 1 else "participants"
+
+    embed.title = "🎯 Quest Ready for Review"
+    embed.description = f"**{quest_name}**\n{status_text}\n\n[Open quest on site]({quest_url})"
+    embed.url = quest_url
+    embed.clear_fields()
+    embed.add_field(name="🎖️ Quest Leader", value=leader_info or "Unknown", inline=True)
+    embed.add_field(name="👥 Participants", value=f"{participant_count} {participant_label}", inline=True)
+    embed.add_field(
+        name="📜 Quest Details",
+        value=f"Quest ID: `{quest_number}`\nReview, edit points, and approve on the site.",
+        inline=False,
+    )
+    embed.set_footer(text=f"Quest ID: {quest_number} | {participant_count} {participant_label} | Review on site")
+    return embed
+
 class QuestMakerView(discord.ui.View):
     def __init__(self, leader: discord.Member, game: str, quest_id: int, guild_id: int, quest_cog, leader_info: dict, quest_type: str = "Quest"):
         super().__init__(timeout=300)
@@ -2625,9 +2671,15 @@ class ActiveQuestManageView(discord.ui.View):
 
                 if quest_image and quest_image.startswith(('http://', 'https://')):
                     review_embed.set_thumbnail(url=quest_image)
-                review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(completed_quest_players)} participants | Review below")
+                simplify_quest_review_embed(
+                    review_embed,
+                    self.join_quest_view.patrol_id,
+                    quest_name,
+                    leader_info,
+                    len(completed_quest_players),
+                )
 
-                review_view = QuestReviewView(self.join_quest_view.patrol_id, quest_name, self.join_quest_view.quest_cog)
+                review_view = build_quest_site_review_view(self.join_quest_view.patrol_id)
                 try:
                     await review_channel.send(embed=review_embed, view=review_view)
                     print(f"✅ Sent quest {self.join_quest_view.patrol_id} to guild {guild.name} review channel")
@@ -3275,11 +3327,17 @@ class QuestCompleteConfirmView(discord.ui.View):
                     if quest_image and quest_image.startswith(('http://', 'https://')):
                         review_embed.set_thumbnail(url=quest_image)
                     
-                    # Add footer
-                    review_embed.set_footer(text="Admins: Click a button below to review this quest")
-                    
-                    # Create review view with approve/adjust buttons
-                    review_view = QuestReviewView(self.join_quest_view.patrol_id, quest_name, self.join_quest_view.quest_cog)
+                    # Keep the review-channel embed compact; detailed roster/points stay on the site.
+                    simplify_quest_review_embed(
+                        review_embed,
+                        self.join_quest_view.patrol_id,
+                        quest_name,
+                        leader_info,
+                        len(completed_quest_players),
+                    )
+
+                    # Link-only view: no Discord approve/edit actions.
+                    review_view = build_quest_site_review_view(self.join_quest_view.patrol_id)
 
                     # Send to admin review channel with fallback handling
                     try:
@@ -3291,7 +3349,7 @@ class QuestCompleteConfirmView(discord.ui.View):
 
                         fallback_embed = discord.Embed(
                             title="🎯 Quest Results Review",
-                            description=f"**{quest_name}**\n\n*Full roster too large - see thread for details*",
+                            description=f"**{quest_name}**\n\n*Open the quest on the site to review details and points.*",
                             color=0xFFA500  # Orange to indicate fallback
                         )
                         fallback_embed.add_field(name="🎖️ Quest Leader", value=f"**{leader_name}**", inline=True)
@@ -3301,7 +3359,7 @@ class QuestCompleteConfirmView(discord.ui.View):
                             value=f"Quest Pts: {total_quest_points} | Crusade: {total_crusade_points}\nGround: {total_ground_kills} | Pilot: {total_pilot_kills} | Turret: {total_griefer_kills}",
                             inline=False
                         )
-                        fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review and approve below")
+                        fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review on site")
 
                         if quest_image and quest_image.startswith(('http://', 'https://')):
                             fallback_embed.set_thumbnail(url=quest_image)
@@ -3801,7 +3859,7 @@ class StartQuest(commands.Cog):
         leader_name = self._cell(leader, idx["leader_name"], "Unknown Leader")
         leader_rank = self._cell(leader, idx["leader_rank"])
         quest_image = self._cell(leader, idx["image"])
-        quest_url = f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(patrol_id), safe='')}"
+        quest_url = build_quest_site_url(patrol_id)
 
         leader_display = f"**Leader:** {leader_name}"
         if leader_rank:
@@ -3858,7 +3916,7 @@ class StartQuest(commands.Cog):
         leader_rank = self._cell(leader, idx["leader_rank"])
         quest_image = self._cell(leader, idx["image"])
         quest_number = patrol_id.split('-')[-1] if '-' in patrol_id else patrol_id
-        quest_url = f"https://orderofthefallenstar.com/OFS_QuestEdit.html?patrol={quote(str(patrol_id), safe='')}"
+        quest_url = build_quest_site_url(patrol_id)
 
         participants = []
         for _, row in rows_with_numbers:
@@ -3904,9 +3962,16 @@ class StartQuest(commands.Cog):
                 review_embed.add_field(name="👥 Participant Roster", value="No participants found", inline=False)
             if quest_image and quest_image.startswith(("http://", "https://")):
                 review_embed.set_thumbnail(url=quest_image)
-            review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(participants)} participants | Review below")
+            simplify_quest_review_embed(
+                review_embed,
+                patrol_id,
+                display_quest_name,
+                f"**{leader_name}**" + (f"\n{leader_rank}" if leader_rank else ""),
+                len(participants),
+                status_text="Completed from the website and awaiting admin review.",
+            )
             try:
-                await review_channel.send(embed=review_embed, view=QuestReviewView(patrol_id, display_quest_name, self))
+                await review_channel.send(embed=review_embed, view=build_quest_site_review_view(patrol_id))
                 print(f"✅ Sent web-completed quest {patrol_id} to guild {guild.name} review channel")
             except discord.HTTPException as e:
                 print(f"❌ Failed to send web-completed review embed for {patrol_id}: {e}")
@@ -5529,12 +5594,18 @@ class QuestPointsRecordingView(discord.ui.View):
                         if quest_image and quest_image.startswith(('http://', 'https://')):
                             review_embed.set_thumbnail(url=quest_image)
 
-                        # Add footer
+                        # Keep the review-channel embed compact; detailed roster/points stay on the site.
                         quest_number = self.patrol_id.split('-')[-1] if '-' in self.patrol_id else self.patrol_id
-                        review_embed.set_footer(text=f"Quest ID: {quest_number} | {len(completed_quest_players)} participants | Review below")
+                        simplify_quest_review_embed(
+                            review_embed,
+                            self.patrol_id,
+                            quest_name,
+                            leader_info,
+                            len(completed_quest_players),
+                        )
 
-                        # Create review view with approve/edit buttons
-                        review_view = QuestReviewView(self.patrol_id, quest_name, self.quest_cog)
+                        # Link-only view: no Discord approve/edit actions.
+                        review_view = build_quest_site_review_view(self.patrol_id)
 
                         # Send to admin review channel with fallback handling
                         try:
@@ -5546,12 +5617,12 @@ class QuestPointsRecordingView(discord.ui.View):
 
                             fallback_embed = discord.Embed(
                                 title="🎯 Quest Results Review",
-                                description=f"**{quest_name}**\n\n*Full roster too large - see thread for details*",
+                                description=f"**{quest_name}**\n\n*Open the quest on the site to review details and points.*",
                                 color=0xFFA500  # Orange to indicate fallback
                             )
                             fallback_embed.add_field(name="🎖️ Quest Leader", value=f"**{leader_name}**", inline=True)
                             fallback_embed.add_field(name="👥 Participants", value=f"{len(completed_quest_players)} players", inline=True)
-                            fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review and approve below")
+                            fallback_embed.set_footer(text=f"Quest ID: {quest_number} | Review on site")
 
                             if quest_image and quest_image.startswith(('http://', 'https://')):
                                 fallback_embed.set_thumbnail(url=quest_image)
@@ -6233,8 +6304,8 @@ class QuestChangeRequestModal(discord.ui.Modal, title="Request Quest Changes"):
             quest_number = self.patrol_id.split('-')[-1] if '-' in self.patrol_id else self.patrol_id
             change_embed.set_footer(text=f"Quest ID: {quest_number} | Status: Changes Requested")
             
-            # Create a new review view for resubmission
-            review_view = QuestReviewView(self.patrol_id, self.quest_name, self.quest_cog)
+            # Keep review-channel follow-up actions on the site.
+            review_view = build_quest_site_review_view(self.patrol_id)
             
             await interaction.response.edit_message(embed=change_embed, view=review_view)
             
