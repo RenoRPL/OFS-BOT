@@ -146,8 +146,7 @@ def _split_title_body(message: discord.Message, scheduled_event: Optional[discor
             return embed_title, embed_body
         if embed_body:
             return title, embed_body
-        # One-line announcements still need a Body for the Tavern card.
-        return title, title
+        return title, ""
 
     return title, "\n".join(body_lines).strip()
 
