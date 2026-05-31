@@ -66,11 +66,45 @@ def _clean_title(line: str) -> str:
     return title[:140]
 
 
-def _split_title_description(content: str) -> tuple[str, str]:
-    lines = [line.strip() for line in (content or "").splitlines()]
-    non_empty = [line for line in lines if line]
+def _content_lines(content: str) -> List[str]:
+    lines = []
+    for raw in (content or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.fullmatch(r"https?://\S+", line, flags=re.I):
+            continue
+        if re.fullmatch(r"<@&?\d+>|@here|@everyone", line, flags=re.I):
+            continue
+        if line.lower() == "forwarded":
+            continue
+        lines.append(line)
+    return lines
+
+
+def _embed_title_description(message: discord.Message) -> tuple[str, str]:
+    for embed in message.embeds:
+        title = _clean_title(getattr(embed, "title", "") or "")
+        body_parts = []
+        description = getattr(embed, "description", "") or ""
+        if description.strip():
+            body_parts.append(description.strip())
+        for field in getattr(embed, "fields", []) or []:
+            name = str(getattr(field, "name", "") or "").strip()
+            value = str(getattr(field, "value", "") or "").strip()
+            if name and value:
+                body_parts.append(f"{name}: {value}")
+            elif value:
+                body_parts.append(value)
+        if title or body_parts:
+            return title or "OFS Event", "\n".join(body_parts).strip() or "Event posted in Discord."
+    return "OFS Event", "Event posted in Discord."
+
+
+def _split_title_description(message: discord.Message) -> tuple[str, str]:
+    non_empty = _content_lines(message.content or "")
     if not non_empty:
-        return "OFS Event", "Event posted in Discord."
+        return _embed_title_description(message)
 
     title = _clean_title(non_empty[0]) or "OFS Event"
     body_lines = non_empty[1:]
@@ -81,6 +115,13 @@ def _split_title_description(content: str) -> tuple[str, str]:
         full = title
         title = full[:87].rstrip() + "..."
         return title, full
+
+    if not body_lines:
+        embed_title, embed_description = _embed_title_description(message)
+        if title == "OFS Event" and embed_title != "OFS Event":
+            return embed_title, embed_description
+        if embed_description and embed_description != "Event posted in Discord.":
+            return title, embed_description
 
     return title, "\n".join(body_lines).strip()
 
@@ -200,7 +241,7 @@ class TavernEvents(commands.Cog):
             values = safe_call(lambda: ws.get_all_values(), label="tavern_events_get_all_values")
             values = _ensure_headers(ws, values)
 
-        title, description = _split_title_description(message.content or "")
+        title, description = _split_title_description(message)
         captured_name = getattr(captured_by, "display_name", None) or str(captured_by)
         event_id = f"discord-event-{message.id}"
         row = [

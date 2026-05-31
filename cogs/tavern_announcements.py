@@ -11,7 +11,7 @@ import asyncio
 import os
 import re
 from datetime import datetime, timezone
-from typing import List, Optional, Set
+from typing import List, Optional, Set, cast
 
 import discord
 from discord.ext import commands
@@ -67,11 +67,47 @@ def _clean_title(line: str) -> str:
     return title[:140]
 
 
-def _split_title_body(content: str) -> tuple[str, str]:
-    lines = [line.strip() for line in (content or "").splitlines()]
-    non_empty = [line for line in lines if line]
+def _content_lines(content: str) -> List[str]:
+    lines = []
+    for raw in (content or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Forwarded event/invite posts often have only a Discord URL or @here in
+        # message.content while the actual title/body live in the embed.
+        if re.fullmatch(r"https?://\S+", line, flags=re.I):
+            continue
+        if re.fullmatch(r"<@&?\d+>|@here|@everyone", line, flags=re.I):
+            continue
+        if line.lower() == "forwarded":
+            continue
+        lines.append(line)
+    return lines
+
+
+def _embed_title_body(message: discord.Message) -> tuple[str, str]:
+    for embed in message.embeds:
+        title = _clean_title(getattr(embed, "title", "") or "")
+        body_parts = []
+        description = getattr(embed, "description", "") or ""
+        if description.strip():
+            body_parts.append(description.strip())
+        for field in getattr(embed, "fields", []) or []:
+            name = str(getattr(field, "name", "") or "").strip()
+            value = str(getattr(field, "value", "") or "").strip()
+            if name and value:
+                body_parts.append(f"{name}: {value}")
+            elif value:
+                body_parts.append(value)
+        if title or body_parts:
+            return title or "OFS Announcement", "\n".join(body_parts).strip()
+    return "OFS Announcement", ""
+
+
+def _split_title_body(message: discord.Message) -> tuple[str, str]:
+    non_empty = _content_lines(message.content or "")
     if not non_empty:
-        return "OFS Announcement", ""
+        return _embed_title_body(message)
 
     title = _clean_title(non_empty[0]) or "OFS Announcement"
     body_lines = non_empty[1:]
@@ -82,6 +118,13 @@ def _split_title_body(content: str) -> tuple[str, str]:
         full = title
         title = full[:87].rstrip() + "..."
         return title, full
+
+    if not body_lines:
+        embed_title, embed_body = _embed_title_body(message)
+        if title == "OFS Announcement" and embed_title != "OFS Announcement":
+            return embed_title, embed_body
+        if embed_body:
+            return title, embed_body
 
     return title, "\n".join(body_lines).strip()
 
@@ -162,7 +205,7 @@ class TavernAnnouncements(commands.Cog):
             return
 
         try:
-            await asyncio.to_thread(self._upsert_announcement, message, member)
+            await asyncio.to_thread(self._upsert_announcement, message, cast(discord.abc.User, member))
             try:
                 await message.add_reaction("✅")
             except Exception:
@@ -187,7 +230,7 @@ class TavernAnnouncements(commands.Cog):
             values = safe_call(lambda: ws.get_all_values(), label="tavern_announcements_get_all_values")
             values = _ensure_headers(ws, values)
 
-        title, body = _split_title_body(message.content or "")
+        title, body = _split_title_body(message)
         author_name = getattr(message.author, "display_name", None) or str(message.author)
         captured_name = getattr(captured_by, "display_name", None) or str(captured_by)
         ann_id = f"discord-{message.id}"
