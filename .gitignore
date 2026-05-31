@@ -70,6 +70,15 @@ google_credentials.json
 *.key
 *.pem
 
+# Project runtime state
+.claude/
+data/
+nul
+guild_settings/*.json
+quest_settings.json
+quest_id_counter*.json
+templates_guild_*.json
+
 # IDE
 .vscode/
 .idea/

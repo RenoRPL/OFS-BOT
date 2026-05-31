@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import discord
 from discord.ext import commands, tasks
 import gspread
@@ -7,61 +8,55 @@ import json
 import asyncio
 from datetime import datetime
 import traceback
-from utils.google_auth import get_google_credentials
+from utils.google_auth import get_google_credentials, open_spreadsheet
 
 class MemberTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # LAZY: sheet is opened on first use (in a thread), not at startup
         self.gc = None
-        self.SHEET_URL = None
+        self.sheet = None
         self.MEMBER_LOG_WORKSHEET = "Discord Member Log"
-        
-        # Load configuration
-        self.load_config()
-        
-        # Initialize Google Sheets
-        self.init_google_sheets()
-        
-        # Start the periodic task
-        self.member_scan_task.start()
+
+        # Read ENV to check if we're in staging
+        self.env = os.getenv("ENV", "production").strip().lower()
+        self.target_guild_id = int(os.getenv("OFS_MEMBER_SCAN_GUILD_ID", "1385700546434039928"))
+
+        # Start the periodic task ONLY if not in staging mode
+        if self.env != "staging":
+            self.member_scan_task.start()
+            print("[INFO] Member tracker background task enabled (production mode)")
+        else:
+            print("[STAGING] Member tracker background task DISABLED - use manual scan only")
     
-    def load_config(self):
-        """Load configuration - using the same Google Sheets URL as quest tracker"""
-        # Use the same Google Sheets URL as the quest tracker
-        self.SHEET_URL = "https://docs.google.com/spreadsheets/d/12OiRHpEALj1hzXRxaXgBOWjHtmUT5hg2ztxIgr4J4y8"
-        print(f"✅ Member Tracker: Using Google Sheets URL: {self.SHEET_URL[:50]}...")
-    
+    def _ensure_sheet(self):
+        """Lazy-open spreadsheet on first use (runs in a thread, never at startup)."""
+        if self.sheet is None:
+            self.sheet = open_spreadsheet()
+        return self.sheet
+
     def init_google_sheets(self):
-        """Initialize Google Sheets connection"""
-        try:
-            self.gc = get_google_credentials()
-            if self.gc:
-                print("✅ Member Tracker: Google Sheets integration ready")
-            else:
-                print("⚠️ Member Tracker: Google Sheets disabled - no credentials available")
-        except Exception as e:
-            print(f"❌ Member Tracker: Failed to initialize Google Sheets: {e}")
+        """DEPRECATED: kept for compat. Use _ensure_sheet() instead."""
+        self._ensure_sheet()
     
-    def get_worksheet(self, sheet_url: str, worksheet_name: str):
+    def get_worksheet(self, worksheet_name: str):
         """Get or create a worksheet"""
         try:
-            if not self.gc or not sheet_url:
+            if not self._ensure_sheet():
                 return None
-                
-            sheet = self.gc.open_by_url(sheet_url)
-            
+
             # Try to get existing worksheet
             try:
-                worksheet = sheet.worksheet(worksheet_name)
+                worksheet = self.sheet.worksheet(worksheet_name)
                 return worksheet
             except gspread.exceptions.WorksheetNotFound:
                 # Create new worksheet if it doesn't exist
-                worksheet = sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+                worksheet = self.sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
                 
                 # Add headers
                 headers = [
-                    "User ID", "Username", "Display Name", "Guild ID", "Guild Name", 
-                    "Roles", "Role Count", "Is Bot", "Account Created", "Joined Guild",
+                    "User ID", "Username", "Display Name", "Guild ID", "Guild Name",
+                    "Roles", "Role IDs", "Role Count", "Is Bot", "Account Created", "Joined Guild",
                     "Avatar URL", "Status", "Last Updated", "Nickname", "Premium Since",
                     "Permissions", "Top Role", "Top Role Color", "Top Role Position", "Mutual Guilds"
                 ]
@@ -92,16 +87,16 @@ class MemberTracker(commands.Cog):
     
     async def scan_all_members(self):
         """Scan all members across all guilds and update the spreadsheet"""
-        if not self.gc or not self.SHEET_URL:
+        if not self._ensure_sheet():
             print("❌ Google Sheets not initialized")
             return
-        
+
         # Check if members intent is enabled
         if not self.bot.intents.members:
             print("❌ Members intent not enabled. Enable it in Discord Developer Portal and bot.py")
             return
-        
-        worksheet = self.get_worksheet(self.SHEET_URL, self.MEMBER_LOG_WORKSHEET)
+
+        worksheet = self.get_worksheet(self.MEMBER_LOG_WORKSHEET)
         if not worksheet:
             print("❌ Could not access Member Log worksheet")
             return
@@ -113,8 +108,8 @@ class MemberTracker(commands.Cog):
             # Clear existing data (keep headers)
             worksheet.clear()
             headers = [
-                "User ID", "Username", "Display Name", "Guild ID", "Guild Name", 
-                "Roles", "Role Count", "Is Bot", "Account Created", "Joined Guild",
+                "User ID", "Username", "Display Name", "Guild ID", "Guild Name",
+                "Roles", "Role IDs", "Role Count", "Is Bot", "Account Created", "Joined Guild",
                 "Avatar URL", "Status", "Last Updated", "Nickname", "Premium Since",
                 "Permissions", "Top Role", "Top Role Color", "Top Role Position", "Mutual Guilds"
             ]
@@ -122,18 +117,30 @@ class MemberTracker(commands.Cog):
             
             all_member_data = []
             
-            # Scan all guilds
-            for guild in self.bot.guilds:
-                print(f"📊 Scanning guild: {guild.name} ({guild.id})")
-                
-                # Get all members in this guild
-                members = guild.members
-                
-                for member in members:
+            # Scan only the production OFS community guild. The bot may also be in
+            # test/staging Discord servers with duplicate role names but different
+            # role IDs; those must not contaminate the production Discord Member Log.
+            guild = self.bot.get_guild(self.target_guild_id)
+            if guild is None:
+                print(f"❌ Target guild {self.target_guild_id} not found. Available guilds: "
+                      f"{[(g.name, g.id) for g in self.bot.guilds]}")
+                return
+
+            print(f"📊 Scanning target guild: {guild.name} ({guild.id})")
+            
+            # Get all members in the target guild
+            members = guild.members
+            
+            for member in members:
                     try:
-                        # Get member roles (excluding @everyone)
-                        roles = [role.name for role in member.roles if role.name != "@everyone"]
-                        roles_str = ", ".join(roles) if roles else "No roles"
+                        # Get member roles (excluding @everyone). Keep both display names and
+                        # stable Discord role IDs so Sheets/App Script can resolve mutable
+                        # banner names by immutable role identity.
+                        member_roles = [role for role in member.roles if role.name != "@everyone"]
+                        role_names = [role.name for role in member_roles]
+                        role_ids = [str(role.id) for role in member_roles]
+                        roles_str = ", ".join(role_names) if role_names else "No roles"
+                        role_ids_str = ", ".join(role_ids) if role_ids else ""
                         
                         # Get top role info
                         top_role = member.top_role
@@ -166,7 +173,8 @@ class MemberTracker(commands.Cog):
                             str(guild.id),  # Guild ID
                             guild.name,  # Guild Name
                             roles_str,  # Roles
-                            len(roles),  # Role Count
+                            role_ids_str,  # Role IDs
+                            len(member_roles),  # Role Count
                             "Yes" if member.bot else "No",  # Is Bot
                             member.created_at.strftime("%Y-%m-%d %H:%M:%S"),  # Account Created
                             member.joined_at.strftime("%Y-%m-%d %H:%M:%S") if member.joined_at else "Unknown",  # Joined Guild
@@ -303,20 +311,25 @@ class MemberTracker(commands.Cog):
             total_bots = 0
             guild_stats = []
             
-            for guild in self.bot.guilds:
-                members = len(guild.members)
-                bots = len([m for m in guild.members if m.bot])
-                humans = members - bots
-                
-                guild_stats.append({
-                    'name': guild.name,
-                    'total': members,
-                    'humans': humans,
-                    'bots': bots
-                })
-                
-                total_members += members
-                total_bots += bots
+            guild = self.bot.get_guild(self.target_guild_id)
+            if guild is None:
+                await ctx.send(f"❌ Target guild {self.target_guild_id} not found. The member scanner is scoped to the production OFS guild.")
+                return
+
+            members = len(guild.members)
+            bots = len([m for m in guild.members if m.bot])
+            humans = members - bots
+            
+            guild_stats.append({
+                'name': guild.name,
+                'id': guild.id,
+                'total': members,
+                'humans': humans,
+                'bots': bots
+            })
+            
+            total_members += members
+            total_bots += bots
             
             embed = discord.Embed(
                 title="📊 Member Statistics",
@@ -329,14 +342,14 @@ class MemberTracker(commands.Cog):
                 value=f"**Total Members:** {total_members}\n"
                       f"**Humans:** {total_members - total_bots}\n"
                       f"**Bots:** {total_bots}\n"
-                      f"**Guilds:** {len(self.bot.guilds)}",
+                      f"**Scanner Guild:** {self.target_guild_id}",
                 inline=False
             )
             
             # Add per-guild stats
             guild_info = ""
             for stats in guild_stats:
-                guild_info += f"**{stats['name']}**\n"
+                guild_info += f"**{stats['name']}** (`{stats['id']}`)\n"
                 guild_info += f"Total: {stats['total']} | Humans: {stats['humans']} | Bots: {stats['bots']}\n\n"
             
             if guild_info:
