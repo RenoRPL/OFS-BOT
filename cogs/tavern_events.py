@@ -182,6 +182,20 @@ class TavernEvents(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def _authorized_member(self, payload: discord.RawReactionActionEvent) -> Optional[discord.abc.User]:
+        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+        member = payload.member or (guild.get_member(payload.user_id) if guild else None)
+        if member is None and guild is not None:
+            try:
+                member = await guild.fetch_member(payload.user_id)
+            except Exception as exc:
+                print(f"[TavernEvents] Failed to fetch reacting member {payload.user_id}: {exc}")
+                return None
+        if not _is_authorized(member):
+            print(f"[TavernEvents] Ignored {CAPTURE_REACTION} from unauthorized user {payload.user_id}")
+            return None
+        return cast(discord.abc.User, member)
+
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.channel_id != EVENTS_CHANNEL_ID:
@@ -191,10 +205,8 @@ class TavernEvents(commands.Cog):
         if payload.user_id == getattr(self.bot.user, "id", None):
             return
 
-        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
-        member = payload.member or (guild.get_member(payload.user_id) if guild else None)
-        if not _is_authorized(member):
-            print(f"[TavernEvents] Ignored {CAPTURE_REACTION} from unauthorized user {payload.user_id}")
+        member = await self._authorized_member(payload)
+        if member is None:
             return
 
         channel = self.bot.get_channel(payload.channel_id)
@@ -216,7 +228,7 @@ class TavernEvents(commands.Cog):
             return
 
         try:
-            await asyncio.to_thread(self._upsert_event, message, cast(discord.abc.User, member))
+            await asyncio.to_thread(self._upsert_event, message, member)
             try:
                 await message.add_reaction("✅")
             except Exception:
@@ -224,6 +236,41 @@ class TavernEvents(commands.Cog):
             print(f"[TavernEvents] Captured event message {message.id}")
         except Exception as exc:
             print(f"[TavernEvents] Capture failed for message {payload.message_id}: {exc}")
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.channel_id != EVENTS_CHANNEL_ID:
+            return
+        if str(payload.emoji) != CAPTURE_REACTION:
+            return
+        if payload.user_id == getattr(self.bot.user, "id", None):
+            return
+
+        member = await self._authorized_member(payload)
+        if member is None:
+            return
+
+        try:
+            deactivated = await asyncio.to_thread(self._deactivate_event, payload.message_id)
+            if deactivated:
+                channel = self.bot.get_channel(payload.channel_id)
+                if channel is None:
+                    try:
+                        channel = await self.bot.fetch_channel(payload.channel_id)
+                    except Exception:
+                        channel = None
+                if channel is not None:
+                    try:
+                        message = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
+                        if self.bot.user:
+                            await message.remove_reaction("✅", self.bot.user)
+                    except Exception:
+                        pass
+                print(f"[TavernEvents] Deactivated event message {payload.message_id}")
+            else:
+                print(f"[TavernEvents] No active row found to deactivate for message {payload.message_id}")
+        except Exception as exc:
+            print(f"[TavernEvents] Deactivate failed for message {payload.message_id}: {exc}")
 
     def _upsert_event(self, message: discord.Message, captured_by: discord.abc.User):
         ws = open_worksheet(EVENTS_SHEET)
@@ -271,6 +318,22 @@ class TavernEvents(commands.Cog):
             safe_call(lambda: ws.update(f"A{row_num}:{end_col}{row_num}", [row], value_input_option="USER_ENTERED"), label="tavern_events_update_row")
         else:
             safe_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"), label="tavern_events_append_row")
+
+    def _deactivate_event(self, message_id: int) -> bool:
+        ws = open_worksheet(EVENTS_SHEET)
+        if not ws:
+            return False
+        values = safe_call(lambda: ws.get_all_values(), label="tavern_events_deactivate_get_all_values")
+        if not values:
+            return False
+        event_id = f"discord-event-{message_id}"
+        for idx, existing in enumerate(values[1:], start=2):
+            existing_id = _norm(existing[0]) if len(existing) > 0 else ""
+            existing_msg_id = _norm(existing[9]) if len(existing) > 9 else ""
+            if existing_id == event_id or existing_msg_id == str(message_id):
+                safe_call(lambda: ws.update_cell(idx, 13, "FALSE"), label="tavern_events_deactivate_active")
+                return True
+        return False
 
 
 async def setup(bot: commands.Bot):
