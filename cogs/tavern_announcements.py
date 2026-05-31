@@ -22,6 +22,7 @@ print("=== LOADED tavern_announcements.py (TAVERN ANNOUNCEMENT CAPTURE) ===")
 
 ANNOUNCEMENTS_CHANNEL_ID = int(os.getenv("TAVERN_ANNOUNCEMENTS_CHANNEL_ID", "1387913290423861288") or "1387913290423861288")
 CAPTURE_REACTION = os.getenv("TAVERN_ANNOUNCEMENT_CAPTURE_REACTION", "📣") or "📣"
+PIN_REACTION = os.getenv("TAVERN_ANNOUNCEMENT_PIN_REACTION", "📌") or "📌"
 ANNOUNCEMENTS_SHEET = os.getenv("TAVERN_ANNOUNCEMENTS_SHEET", "Tavern_Announcements").strip() or "Tavern_Announcements"
 ADMIN_IDS: Set[int] = {
     int(part)
@@ -228,13 +229,25 @@ class TavernAnnouncements(commands.Cog):
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.channel_id != ANNOUNCEMENTS_CHANNEL_ID:
             return
-        if str(payload.emoji) != CAPTURE_REACTION:
+        emoji = str(payload.emoji)
+        if emoji not in {CAPTURE_REACTION, PIN_REACTION}:
             return
         if payload.user_id == getattr(self.bot.user, "id", None):
             return
 
         member = await self._authorized_member(payload)
         if member is None:
+            return
+
+        if emoji == PIN_REACTION:
+            try:
+                pinned = await asyncio.to_thread(self._pin_announcement, payload.message_id)
+                if pinned:
+                    print(f"[TavernAnnouncements] Pinned announcement message {payload.message_id}")
+                else:
+                    print(f"[TavernAnnouncements] No row found to pin for message {payload.message_id}; publish it with {CAPTURE_REACTION} first")
+            except Exception as exc:
+                print(f"[TavernAnnouncements] Pin failed for message {payload.message_id}: {exc}")
             return
 
         channel = self.bot.get_channel(payload.channel_id)
@@ -278,13 +291,25 @@ class TavernAnnouncements(commands.Cog):
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         if payload.channel_id != ANNOUNCEMENTS_CHANNEL_ID:
             return
-        if str(payload.emoji) != CAPTURE_REACTION:
+        emoji = str(payload.emoji)
+        if emoji not in {CAPTURE_REACTION, PIN_REACTION}:
             return
         if payload.user_id == getattr(self.bot.user, "id", None):
             return
 
         member = await self._authorized_member(payload)
         if member is None:
+            return
+
+        if emoji == PIN_REACTION:
+            try:
+                unpinned = await asyncio.to_thread(self._unpin_announcement, payload.message_id)
+                if unpinned:
+                    print(f"[TavernAnnouncements] Unpinned announcement message {payload.message_id}")
+                else:
+                    print(f"[TavernAnnouncements] No pinned row found to unpin for message {payload.message_id}")
+            except Exception as exc:
+                print(f"[TavernAnnouncements] Unpin failed for message {payload.message_id}: {exc}")
             return
 
         try:
@@ -334,13 +359,25 @@ class TavernAnnouncements(commands.Cog):
         author_name = getattr(message.author, "display_name", None) or str(message.author)
         captured_name = getattr(captured_by, "display_name", None) or str(captured_by)
         ann_id = f"discord-{message.id}"
+
+        existing_pinned = "FALSE"
+        row_num = None
+        for idx, existing in enumerate(values[1:], start=2):
+            existing_cells = [_norm(cell) for cell in existing]
+            if ann_id in existing_cells or str(message.id) in existing_cells:
+                row_num = idx
+                existing_pinned = _norm(existing[5]).upper() if len(existing) > 5 else "FALSE"
+                if existing_pinned not in {"TRUE", "FALSE"}:
+                    existing_pinned = "FALSE"
+                break
+
         row = [
             ann_id,
             title,
             body,
             message.created_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
             author_name,
-            "FALSE",
+            existing_pinned,
             "important",
             _first_image_url(message, scheduled_event),
             _message_link(message),
@@ -350,13 +387,6 @@ class TavernAnnouncements(commands.Cog):
             _utc_now(),
             "TRUE",
         ]
-
-        row_num = None
-        for idx, existing in enumerate(values[1:], start=2):
-            existing_cells = [_norm(cell) for cell in existing]
-            if ann_id in existing_cells or str(message.id) in existing_cells:
-                row_num = idx
-                break
 
         clear_width = 25
         write_row = row + [""] * (clear_width - len(row))
@@ -381,6 +411,46 @@ class TavernAnnouncements(commands.Cog):
             if existing_id == ann_id or existing_msg_id == str(message_id):
                 safe_call(lambda: ws.update_cell(idx, 14, "FALSE"), label="tavern_announcements_deactivate_active")
                 return True
+        return False
+
+    def _pin_announcement(self, message_id: int) -> bool:
+        ws = open_worksheet(ANNOUNCEMENTS_SHEET)
+        if not ws:
+            return False
+        values = safe_call(lambda: ws.get_all_values(), label="tavern_announcements_pin_get_all_values")
+        values = _ensure_headers(ws, values)
+        if not values:
+            return False
+        ann_id = f"discord-{message_id}"
+        target_row = None
+        for idx, existing in enumerate(values[1:], start=2):
+            existing_cells = [_norm(cell) for cell in existing]
+            is_target = ann_id in existing_cells or str(message_id) in existing_cells
+            pinned_now = (_norm(existing[5]).upper() == "TRUE") if len(existing) > 5 else False
+            if is_target:
+                target_row = idx
+            elif pinned_now:
+                safe_call(lambda row=idx: ws.update_cell(row, 6, "FALSE"), label="tavern_announcements_unpin_other")
+        if target_row is None:
+            return False
+        safe_call(lambda: ws.update_cell(target_row, 6, "TRUE"), label="tavern_announcements_pin_target")
+        return True
+
+    def _unpin_announcement(self, message_id: int) -> bool:
+        ws = open_worksheet(ANNOUNCEMENTS_SHEET)
+        if not ws:
+            return False
+        values = safe_call(lambda: ws.get_all_values(), label="tavern_announcements_unpin_get_all_values")
+        if not values:
+            return False
+        ann_id = f"discord-{message_id}"
+        for idx, existing in enumerate(values[1:], start=2):
+            existing_cells = [_norm(cell) for cell in existing]
+            if ann_id in existing_cells or str(message_id) in existing_cells:
+                if len(existing) > 5 and _norm(existing[5]).upper() == "TRUE":
+                    safe_call(lambda: ws.update_cell(idx, 6, "FALSE"), label="tavern_announcements_unpin_pinned")
+                    return True
+                return False
         return False
 
 
