@@ -62,7 +62,11 @@ def _message_link(message: discord.Message) -> str:
 
 
 def _scheduled_event_id(content: str) -> Optional[int]:
-    match = re.search(r"[?&]event=(\d+)", content or "")
+    text = content or ""
+    match = re.search(r"[?&]event=(\d+)", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"discord(?:app)?\.com/events/\d+/(\d+)", text, flags=re.I)
     if match:
         return int(match.group(1))
     return None
@@ -84,9 +88,11 @@ def _content_lines(content: str) -> List[str]:
         # message.content while the actual title/body live in the embed.
         if re.fullmatch(r"https?://\S+", line, flags=re.I):
             continue
+        if re.fullmatch(r"(?:starting|starts)\s+in\s+[^:]+:\s*https?://\S+", line, flags=re.I):
+            continue
         if re.fullmatch(r"<@&?\d+>|@here|@everyone", line, flags=re.I):
             continue
-        if line.lower() == "forwarded":
+        if re.fullmatch(r"[↱↳\s]*(?:forwarded|forward)", line, flags=re.I):
             continue
         lines.append(line)
     return lines
