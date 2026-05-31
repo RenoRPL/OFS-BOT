@@ -153,15 +153,20 @@ def _is_authorized(member: Optional[discord.abc.User]) -> bool:
 
 
 def _ensure_headers(ws, values: List[List[str]]) -> List[List[str]]:
-    if not values:
-        safe_call(lambda: ws.append_row(EXPECTED_HEADERS, value_input_option="USER_ENTERED"), label="tavern_announcements_append_headers")
-        return [EXPECTED_HEADERS]
-
     first = values[0] if values else []
-    if not first or _norm(first[0]).lower() != "id":
-        # Preserve unknown user data. The site expects headers in row 1, so log
-        # the repair needed instead of shifting data behind an operator's back.
-        print(f"[TavernAnnouncements] Unexpected '{ANNOUNCEMENTS_SHEET}' header row. Expected: {EXPECTED_HEADERS}")
+    expected_width = len(EXPECTED_HEADERS)
+    needs_repair = len(first) < expected_width or any(_norm(first[idx]) != header for idx, header in enumerate(EXPECTED_HEADERS))
+    if needs_repair:
+        end_col = chr(ord("A") + expected_width - 1)
+        safe_call(
+            lambda: ws.update(f"A1:{end_col}1", [EXPECTED_HEADERS], value_input_option="USER_ENTERED"),
+            label="tavern_announcements_repair_headers",
+        )
+        if values:
+            values[0] = EXPECTED_HEADERS
+        else:
+            values = [EXPECTED_HEADERS]
+        print(f"[TavernAnnouncements] Repaired '{ANNOUNCEMENTS_SHEET}' headers in A1:{end_col}1")
     return values
 
 
@@ -271,7 +276,7 @@ class TavernAnnouncements(commands.Cog):
                 lambda: ss.add_worksheet(title=ANNOUNCEMENTS_SHEET, rows=200, cols=len(EXPECTED_HEADERS)),
                 label="tavern_announcements_create_sheet",
             )
-            safe_call(lambda: ws.append_row(EXPECTED_HEADERS, value_input_option="USER_ENTERED"), label="tavern_announcements_append_headers")
+            safe_call(lambda: ws.update("A1:N1", [EXPECTED_HEADERS], value_input_option="USER_ENTERED"), label="tavern_announcements_write_headers")
             values = [EXPECTED_HEADERS]
         else:
             values = safe_call(lambda: ws.get_all_values(), label="tavern_announcements_get_all_values")
@@ -300,15 +305,19 @@ class TavernAnnouncements(commands.Cog):
 
         row_num = None
         for idx, existing in enumerate(values[1:], start=2):
-            if existing and _norm(existing[0]) == ann_id:
+            existing_cells = [_norm(cell) for cell in existing]
+            if ann_id in existing_cells or str(message.id) in existing_cells:
                 row_num = idx
                 break
 
+        clear_width = 25
+        write_row = row + [""] * (clear_width - len(row))
+        end_col = chr(ord("A") + clear_width - 1)
         if row_num:
-            end_col = chr(ord("A") + len(EXPECTED_HEADERS) - 1)
-            safe_call(lambda: ws.update(f"A{row_num}:{end_col}{row_num}", [row], value_input_option="USER_ENTERED"), label="tavern_announcements_update_row")
+            safe_call(lambda: ws.update(f"A{row_num}:{end_col}{row_num}", [write_row], value_input_option="USER_ENTERED"), label="tavern_announcements_update_row")
         else:
-            safe_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"), label="tavern_announcements_append_row")
+            next_row = max(len(values) + 1, 2)
+            safe_call(lambda: ws.update(f"A{next_row}:{end_col}{next_row}", [write_row], value_input_option="USER_ENTERED"), label="tavern_announcements_insert_row")
 
     def _deactivate_announcement(self, message_id: int) -> bool:
         ws = open_worksheet(ANNOUNCEMENTS_SHEET)
