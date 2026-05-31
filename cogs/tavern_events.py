@@ -60,6 +60,13 @@ def _message_link(message: discord.Message) -> str:
     return f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
 
 
+def _scheduled_event_id(content: str) -> Optional[int]:
+    match = re.search(r"[?&]event=(\d+)", content or "")
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _clean_title(line: str) -> str:
     title = re.sub(r"^\s*#+\s*", "", line or "").strip()
     title = re.sub(r"^[📅🗓️\-–—:\s]+", "", title).strip()
@@ -101,9 +108,23 @@ def _embed_title_description(message: discord.Message) -> tuple[str, str]:
     return "OFS Event", "Event posted in Discord."
 
 
-def _split_title_description(message: discord.Message) -> tuple[str, str]:
+def _scheduled_event_title_description(scheduled_event: Optional[discord.ScheduledEvent]) -> tuple[str, str]:
+    if not scheduled_event:
+        return "OFS Event", "Event posted in Discord."
+    title = _clean_title(getattr(scheduled_event, "name", "") or "") or "OFS Event"
+    description = (getattr(scheduled_event, "description", "") or "").strip() or "Event posted in Discord."
+    return title, description
+
+
+def _split_title_description(
+    message: discord.Message,
+    scheduled_event: Optional[discord.ScheduledEvent] = None,
+) -> tuple[str, str]:
     non_empty = _content_lines(message.content or "")
     if not non_empty:
+        event_title, event_description = _scheduled_event_title_description(scheduled_event)
+        if event_title != "OFS Event" or event_description != "Event posted in Discord.":
+            return event_title, event_description
         return _embed_title_description(message)
 
     title = _clean_title(non_empty[0]) or "OFS Event"
@@ -117,16 +138,26 @@ def _split_title_description(message: discord.Message) -> tuple[str, str]:
         return title, full
 
     if not body_lines:
+        event_title, event_description = _scheduled_event_title_description(scheduled_event)
+        if event_title != "OFS Event" or event_description != "Event posted in Discord.":
+            return event_title, event_description
         embed_title, embed_description = _embed_title_description(message)
         if title == "OFS Event" and embed_title != "OFS Event":
             return embed_title, embed_description
         if embed_description and embed_description != "Event posted in Discord.":
             return title, embed_description
+        return title, title
 
     return title, "\n".join(body_lines).strip()
 
 
-def _first_image_url(message: discord.Message) -> str:
+def _first_image_url(message: discord.Message, scheduled_event: Optional[discord.ScheduledEvent] = None) -> str:
+    cover_image = getattr(scheduled_event, "cover_image", None) if scheduled_event else None
+    if cover_image:
+        try:
+            return str(cover_image.url)
+        except Exception:
+            pass
     for attachment in message.attachments:
         content_type = (attachment.content_type or "").lower()
         filename = (attachment.filename or "").lower()
@@ -140,7 +171,13 @@ def _first_image_url(message: discord.Message) -> str:
     return ""
 
 
-def _extract_event_date(message: discord.Message, description: str) -> str:
+def _extract_event_date(
+    message: discord.Message,
+    description: str,
+    scheduled_event: Optional[discord.ScheduledEvent] = None,
+) -> str:
+    if scheduled_event and getattr(scheduled_event, "start_time", None):
+        return scheduled_event.start_time.astimezone(timezone.utc).isoformat(timespec="seconds")
     # Prefer Discord's message timestamp as the safe default. If the post begins
     # with an ISO-like date, use that for the Tavern countdown/order.
     text = description or message.content or ""
@@ -235,8 +272,17 @@ class TavernEvents(commands.Cog):
             print(f"[TavernEvents] Ignored bot-authored event message {message.id}")
             return
 
+        scheduled_event = None
+        event_id = _scheduled_event_id(message.content or "")
+        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+        if event_id and guild is not None:
+            try:
+                scheduled_event = await guild.fetch_scheduled_event(event_id)
+            except Exception as exc:
+                print(f"[TavernEvents] Failed to fetch scheduled event {event_id}: {exc}")
+
         try:
-            await asyncio.to_thread(self._upsert_event, message, member)
+            await asyncio.to_thread(self._upsert_event, message, member, scheduled_event)
             try:
                 await message.add_reaction("✅")
             except Exception:
@@ -280,7 +326,12 @@ class TavernEvents(commands.Cog):
         except Exception as exc:
             print(f"[TavernEvents] Deactivate failed for message {payload.message_id}: {exc}")
 
-    def _upsert_event(self, message: discord.Message, captured_by: discord.abc.User):
+    def _upsert_event(
+        self,
+        message: discord.Message,
+        captured_by: discord.abc.User,
+        scheduled_event: Optional[discord.ScheduledEvent] = None,
+    ):
         ws = open_worksheet(EVENTS_SHEET)
         if not ws:
             ss = open_spreadsheet()
@@ -296,17 +347,17 @@ class TavernEvents(commands.Cog):
             values = safe_call(lambda: ws.get_all_values(), label="tavern_events_get_all_values")
             values = _ensure_headers(ws, values)
 
-        title, description = _split_title_description(message)
+        title, description = _split_title_description(message, scheduled_event)
         captured_name = getattr(captured_by, "display_name", None) or str(captured_by)
         event_id = f"discord-event-{message.id}"
         row = [
             event_id,
             title,
-            _extract_event_date(message, description),
+            _extract_event_date(message, description, scheduled_event),
             "Discord Event",
             description,
             "upcoming",
-            _first_image_url(message),
+            _first_image_url(message, scheduled_event),
             _message_link(message),
             str(message.channel.id),
             str(message.id),

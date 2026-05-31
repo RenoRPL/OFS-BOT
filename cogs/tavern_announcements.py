@@ -61,6 +61,13 @@ def _message_link(message: discord.Message) -> str:
     return f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
 
 
+def _scheduled_event_id(content: str) -> Optional[int]:
+    match = re.search(r"[?&]event=(\d+)", content or "")
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _clean_title(line: str) -> str:
     title = re.sub(r"^\s*#+\s*", "", line or "").strip()
     title = re.sub(r"^[📣\-–—:\s]+", "", title).strip()
@@ -104,9 +111,20 @@ def _embed_title_body(message: discord.Message) -> tuple[str, str]:
     return "OFS Announcement", ""
 
 
-def _split_title_body(message: discord.Message) -> tuple[str, str]:
+def _scheduled_event_title_body(scheduled_event: Optional[discord.ScheduledEvent]) -> tuple[str, str]:
+    if not scheduled_event:
+        return "OFS Announcement", ""
+    title = _clean_title(getattr(scheduled_event, "name", "") or "") or "OFS Announcement"
+    body = (getattr(scheduled_event, "description", "") or "").strip()
+    return title, body
+
+
+def _split_title_body(message: discord.Message, scheduled_event: Optional[discord.ScheduledEvent] = None) -> tuple[str, str]:
     non_empty = _content_lines(message.content or "")
     if not non_empty:
+        event_title, event_body = _scheduled_event_title_body(scheduled_event)
+        if event_title != "OFS Announcement" or event_body:
+            return event_title, event_body
         return _embed_title_body(message)
 
     title = _clean_title(non_empty[0]) or "OFS Announcement"
@@ -120,16 +138,27 @@ def _split_title_body(message: discord.Message) -> tuple[str, str]:
         return title, full
 
     if not body_lines:
+        event_title, event_body = _scheduled_event_title_body(scheduled_event)
+        if event_title != "OFS Announcement" or event_body:
+            return event_title, event_body
         embed_title, embed_body = _embed_title_body(message)
         if title == "OFS Announcement" and embed_title != "OFS Announcement":
             return embed_title, embed_body
         if embed_body:
             return title, embed_body
+        # One-line announcements still need a Body for the Tavern card.
+        return title, title
 
     return title, "\n".join(body_lines).strip()
 
 
-def _first_image_url(message: discord.Message) -> str:
+def _first_image_url(message: discord.Message, scheduled_event: Optional[discord.ScheduledEvent] = None) -> str:
+    cover_image = getattr(scheduled_event, "cover_image", None) if scheduled_event else None
+    if cover_image:
+        try:
+            return str(cover_image.url)
+        except Exception:
+            pass
     for attachment in message.attachments:
         content_type = (attachment.content_type or "").lower()
         filename = (attachment.filename or "").lower()
@@ -221,8 +250,17 @@ class TavernAnnouncements(commands.Cog):
             print(f"[TavernAnnouncements] Ignored bot-authored announcement message {message.id}")
             return
 
+        scheduled_event = None
+        event_id = _scheduled_event_id(message.content or "")
+        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+        if event_id and guild is not None:
+            try:
+                scheduled_event = await guild.fetch_scheduled_event(event_id)
+            except Exception as exc:
+                print(f"[TavernAnnouncements] Failed to fetch scheduled event {event_id}: {exc}")
+
         try:
-            await asyncio.to_thread(self._upsert_announcement, message, member)
+            await asyncio.to_thread(self._upsert_announcement, message, member, scheduled_event)
             try:
                 await message.add_reaction("✅")
             except Exception:
@@ -266,7 +304,12 @@ class TavernAnnouncements(commands.Cog):
         except Exception as exc:
             print(f"[TavernAnnouncements] Deactivate failed for message {payload.message_id}: {exc}")
 
-    def _upsert_announcement(self, message: discord.Message, captured_by: discord.abc.User):
+    def _upsert_announcement(
+        self,
+        message: discord.Message,
+        captured_by: discord.abc.User,
+        scheduled_event: Optional[discord.ScheduledEvent] = None,
+    ):
         ws = open_worksheet(ANNOUNCEMENTS_SHEET)
         if not ws:
             ss = open_spreadsheet()
@@ -282,7 +325,7 @@ class TavernAnnouncements(commands.Cog):
             values = safe_call(lambda: ws.get_all_values(), label="tavern_announcements_get_all_values")
             values = _ensure_headers(ws, values)
 
-        title, body = _split_title_body(message)
+        title, body = _split_title_body(message, scheduled_event)
         author_name = getattr(message.author, "display_name", None) or str(message.author)
         captured_name = getattr(captured_by, "display_name", None) or str(captured_by)
         ann_id = f"discord-{message.id}"
@@ -294,7 +337,7 @@ class TavernAnnouncements(commands.Cog):
             author_name,
             "FALSE",
             "important",
-            _first_image_url(message),
+            _first_image_url(message, scheduled_event),
             _message_link(message),
             str(message.channel.id),
             str(message.id),
